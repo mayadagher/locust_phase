@@ -18,4 +18,6 @@ pynumdiff
 cvxpy
 osqp
 scs
-awkward
+# pyarrow
+awkward==2.6.4
+zarr==2.17.0

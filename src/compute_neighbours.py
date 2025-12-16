@@ -5,9 +5,10 @@ import xarray as xr
 from sklearn.neighbors import BallTree
 from scipy.spatial import Voronoi
 import time
-import awkward as ak
+import os
+import h5py
 
-from clean_tracks import load_preprocessed_data, save_data
+from data_handling import *
 
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
 
@@ -15,7 +16,7 @@ from clean_tracks import load_preprocessed_data, save_data
 def vectorized_region_assignment(x, y, theta, nbr_list, num_regions):
     """
     x, y, theta : shape (agent,)
-    nbr_list : Python list of numpy arrays of neighbour indices
+    nbr_list : Python list of list of neighbour indices
     num_regions : int
     """
 
@@ -56,7 +57,7 @@ def vectorized_region_assignment(x, y, theta, nbr_list, num_regions):
     region_list = []
     for i in range(len(nbr_list)):
         k = len(nbr_list[i])
-        region_list.append(regions[i, :k].astype(int))
+        region_list.append(regions[i, :k].astype(float))
 
     return region_list
 
@@ -89,57 +90,70 @@ def metric_step(positions, radius):
 
 # Compute kNN neighbours for one timestep (topological)
 def knn_step(positions, k):
-    tree = BallTree(positions)
-    _, indices = tree.query(positions, k=k+1)
-    return [inds[1:] for inds in indices]  # drop self
+    valid_mask = ~np.isnan(positions).any(axis=1)
+    positions_valid = positions[valid_mask]
+
+    tree = BallTree(positions_valid)
+    _, indices = tree.query(positions_valid, k=k+1)
+    
+    # Find original indices of neighbours
+    original_indices = np.where(valid_mask)[0]
+    nbr_indices = [original_indices[new_inds] for new_inds in indices]
+
+    # Reinsert empty lists for invalid agents
+    new_idx = 0
+    nbr_full = []
+    for valid in valid_mask:
+        if valid:
+            nbr_full.append(nbr_indices[new_idx])
+            new_idx += 1
+        else:
+            nbr_full.append(np.array([], dtype=int))
+
+    # Remove self from each neighbour list
+    nbr_full = [inds[inds != i] for i, inds in enumerate(nbr_full)]
+
+    return nbr_full
 
 # Compute Voronoi neighbours for one frame
 def voronoi_step(positions, n_agents):
     try:
         vor = Voronoi(positions)
     except Exception:
-        return [np.array([], dtype=int) for _ in range(n_agents)]
+        return [[] for _ in range(n_agents)]
 
     nbrs = {i: set() for i in range(n_agents)}
     for i1, i2 in vor.ridge_points:
         nbrs[i1].add(i2)
         nbrs[i2].add(i1)
-    return [np.array(sorted(list(v))) for v in nbrs.values()]
+    return [sorted(list(v)) for v in nbrs.values()]
 
 # Main function: compute neighbours for each frame, and optionally the regions they occupy relative to the focal's heading
-def compute_nbrs(ds, interaction: str, interaction_param=None, regions: bool=False, num_regions=None):
+def compute_nbrs(ds, interaction: str, interaction_param=None):
     """
     ds: xarray.Dataset with dims ('id', 'frame')
-         variables: x_high_ord, y_high_ord, theta_raw
+         variables: x_high_ord, y_high_ord, theta_raw (should probably be smoothed for future use)
     """
 
     # Count length of dimensions
     n_ids = len(ds.id.values)
     frames = ds.frame.values
-    n_frames = len(frames)
 
-    # Initialize output arrays: object dtype
-    nbrs = xr.DataArray(np.empty((n_ids, n_frames), dtype=object), coords=dict(id=ds.id, frame=ds.frame), name="nbrs")
-
-    region_da = None
-    if regions:
-        region_da = xr.DataArray(np.empty((n_ids, n_frames), dtype=object), coords=dict(id=ds.id, frame=ds.frame),
-            name="regions",)
+    # Initialize output lists
+    nbrs_container = []
 
     # Iterate over frames
-    for fi, f in enumerate(frames):
+    for f in frames:
 
         sub = ds.sel(frame=f)
-        positions = np.column_stack([sub.x_high_ord.values, sub.y_high_ord.values])
+        positions = np.column_stack([sub.x_sg.values, sub.y_sg.values])
 
         # Exclude agents who are outside of boundary
         n_agents = np.sum(sub['missing'] != 1) # Check how many active tracklets there are
 
-        if n_agents < 2:
-            # no neighbours possible
-            nbrs[:, fi] = np.array([np.array([], dtype=int)] * n_agents, dtype=object)
-            if regions:
-                region_da[:, fi] = np.array([np.array([], dtype=int)] * n_agents, dtype=object)
+        if n_agents < 2: # No neighbours possible
+            nbrs_container.append([[] for _ in range(n_ids)])
+            print('Warning: frame with less than 2 agents.')
             continue
 
         # Choose interaction rule
@@ -158,56 +172,127 @@ def compute_nbrs(ds, interaction: str, interaction_param=None, regions: bool=Fal
         else:
             raise ValueError(f"Interaction {interaction} not implemented. Interaction must be either 'metric', 'topo', or 'voronoi'.")
     
-        nbrs[:, fi] = nbr_list
-        # Optional region assignment
-        if regions and fi > 0: # Orientation can't be computed on first frame
-            region_vals = vectorized_region_assignment(x=sub.x_high_ord.values, y=sub.y_high_ord.values, theta=sub.theta_raw.values, nbr_list=nbr_list, num_regions=num_regions)
-            region_da[:, fi] = region_vals
+        nbrs_container.append(nbr_list)
 
-    # Attach to dataset
-    ds_out = ds.copy()
-    ds_out[f"nbrs_{interaction}_{interaction_param}"] = nbrs.astype(str)
-    if regions:
-        ds_out["regions"] = region_da
+    return nbrs_container
 
-    return ds_out
+def compute_regions(ds, nbr_values, nbr_offsets, num_regions: int):
+    '''Compute what regions each neighbour lies in, relative to the orientation of the focal. Uses CSR notation for neighbour lists. Inputs are x/y_high_ord and theta_raw, but this can be switched out
+    once smoothing approach has been established.'''
 
-'''_____________________________________________________PARAMETERS____________________________________________________________'''
-# Loading parameters
-batch_num = 1
-exp_name = '20230329'
-system = 'locusts'
 
-# Interaction parameters
-# inter_dict = {'metric': [15, 50, 100], 'topo': [1, 3, 7], 'voronoi': [None]}
-inter_dict = {'metric': [15]}
+    # Count length of dimensions
+    n_ids = len(ds.id.values)
+    frames = ds.frame.values
+    n_frames = len(frames)
 
-'''_____________________________________________________RUN CODE____________________________________________________________'''
+    # Check nbr_offsets has correct length (probably correct for this ds)
+    assert len(nbr_offsets) == n_frames * n_ids + 1
 
-if __name__ == "__main__":
+    # Initialize output lists
+    regions_container = []
 
-    # Load previously pre-processed data
-    load_name = system + '_batch_' + str(batch_num) + '_' + exp_name + '.h5'
-    ds = load_preprocessed_data(load_name)
-    print('Pre-processed data loaded.')
+    # Iterate over frames
+    for fi in range(1, n_frames):
 
-    # Compute neighbours using different conditions
-    ds_temp = ds.copy()
-    ds.close()  # Close original dataset to free resources (also necessary for overwriting file later)
+        # Create sub-dataset for this frame
+        sub = ds.sel(frame=frames[fi])
 
+        # Get list of neighbours for this frame
+        nbrs_list = []
+        for ni in range(n_ids):
+            start_idx = nbr_offsets[fi * n_ids + ni]
+            end_idx = nbr_offsets[fi * n_ids + ni + 1]
+            nbrs_list.append(nbr_values[int(start_idx):int(end_idx)])
+        
+        # Compute what regions each neighbour lies in, relative to the orientation of the focal
+        region_vals = vectorized_region_assignment(x=sub.x_sg.values, y=sub.y_sg.values, theta=sub.theta_sg.values, nbr_list=nbrs_list, num_regions=num_regions)
+        regions_container.append(region_vals)
+
+    return regions_container
+
+def ragged_to_csr(container):
+    """
+    container: list of length T
+        each element is a list of length N
+            each element is a 1D numpy array of variable length
+
+    Returns:
+        values  : 1D numpy array (flattened)
+        offsets : 1D numpy array of length (T*N + 1)
+
+    To index values correctly, use frame_idx*n_ids + id_idx.
+    """
+    n_frames = len(container)
+    n_ids = len(container[0])
+    total = sum(len(arr) for frame in container for arr in frame) # Total length of all neighbours of all ids in all frames
+
+    # Initialize storage arrays
+    values = np.empty(total, dtype=np.float32)
+    offsets = np.zeros(n_frames * n_ids + 1, dtype=np.float32)
+
+    # Initialize index counters
+    k = 0   # flat values index
+    p = 0   # flat (t, i) index
+
+    for t in range(n_frames):
+        for i in range(n_ids):
+            arr = np.asarray(container[t][i], dtype=np.float32)
+            values[k:k+len(arr)] = arr
+            k += len(arr)
+            offsets[p+1] = offsets[p] + len(arr)
+            p += 1
+
+    return values, offsets
+
+def create_nbrs_h5(ds, inter_dict, exp_name: str, batch_num: int, do_regions: bool = False, num_regions = None):
+    '''Compute neighbours according to different interaction rules and save to h5 files using values-offsets indexing.
+    Value: ids of neighbours.
+    Offsets: index at which next focal starts.'''
+
+    h5_path = f'./preprocessed/{exp_name}/batch_{batch_num}/nbrs.h5'
+
+    # We load the CSR arrays (values/offsets) for nbrs into memory so they can be passed to compute_regions if neighbours are present but regions are not.
+    existing = load_neighbours_hdf5(h5_path)
+
+    # Compute new neighbours/regions for any interaction-param combos not already computed
     for interaction in list(inter_dict.keys()):
         for inter_param in inter_dict[interaction]:
-            t1 = time.time()
-            ds_temp = compute_nbrs(ds_temp, interaction = interaction, interaction_param = inter_param)
-            t2 = time.time() 
-            print(f'{interaction}, {inter_param} completed in {round(t2 - t1, 2)} seconds.')
-    print(ds_temp)
-    
-    # Save new columns
-    save_name = system + '_batch_' + str(batch_num) + '_' + exp_name # Overwrite previous file
-    save_data(ds_temp, save_name)
-    print('Saved updated data.')
 
-    # Clean memory
-    ds_temp.close()
-    del ds_temp, ds
+            # Determine whether nbrs/regions already exist in the HDF5
+            param_key = str(inter_param)
+            has_nbrs = (interaction in existing and param_key in existing[interaction] and 'nbrs' in existing[interaction][param_key])
+            has_regions = (interaction in existing and param_key in existing[interaction] and 'regions' in existing[interaction][param_key])
+
+            if has_nbrs: # If we have neighbours, don't have regions, AND want regions, load vals and offsets to be used to compute regions
+                print(f'Neighbours for {interaction}/{param_key} already exist.')
+                if (not has_regions and do_regions):
+                    # Load existing nbrs CSR arrays
+                    nbr_vals = existing[interaction][param_key]['nbrs']['values']
+                    nbr_offsets = existing[interaction][param_key]['nbrs']['offsets']
+                    print(f"Loaded existing neighbours for {interaction}/{param_key} from {h5_path}")
+            else:
+                print(f"Computing neighbours for {interaction} ({param_key})...")
+
+                # Compute neighbours fresh
+                t1 = time.time()
+                nbrs_out = compute_nbrs(ds, interaction = interaction, interaction_param = inter_param)
+                nbr_vals, nbr_offsets = ragged_to_csr(nbrs_out)
+                t2 = time.time()
+                print(f'{interaction} ({inter_param}) completed in {round(t2 - t1, 2)} seconds.')
+
+            if (do_regions and not has_regions):
+                # If neighbours exist (either loaded or just computed), compute regions
+                regions_out = compute_regions(ds, nbr_vals, nbr_offsets, num_regions)
+                r_vals, r_offsets = ragged_to_csr(regions_out)
+
+            # Save vals, offsets to an h5 file (appends to existing, or creates a new file)
+            if not has_nbrs:
+                save_neighbours_hdf5(h5_path, interaction, inter_param, nbr_vals, nbr_offsets, 'nbrs')
+                print(f"Saved neighbours for {interaction} ({inter_param}) to {h5_path}.")
+                del nbr_vals, nbr_offsets
+
+            if (not has_regions and do_regions):
+                save_neighbours_hdf5(h5_path, interaction, inter_param, r_vals, r_offsets, 'regions')
+                print(f"Saved regions for {interaction} ({inter_param}) to {h5_path}.")
+                del r_vals, r_offsets

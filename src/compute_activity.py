@@ -6,7 +6,7 @@ from tqdm import tqdm
 from numpy.fft import fft, ifft, fftfreq
 from scipy.signal import find_peaks
 
-from data_handling import load_preprocessed_data, save_data
+from data_handling import load_preprocessed_data, save_ds
 
 '''_____________________________________________________COMPUTATION FUNCTIONS____________________________________________________________'''
 
@@ -198,8 +198,6 @@ def compute_bouts(ds):
 
     return ds
 
-
-
 '''_____________________________________________________PARAMETERS____________________________________________________________'''
 # Loading parameters
 batch_num = 1
@@ -250,7 +248,7 @@ if __name__ == "__main__":
 
     # Re-save data, since bout computation takes some time
     save_name = system + '_batch_' + str(batch_num) + '_' + exp_name
-    save_data(ds, save_name)
+    save_ds(ds, save_name)
     print('Saved updated data.')
 
     # Animate active bout lengths:

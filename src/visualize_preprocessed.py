@@ -187,6 +187,111 @@ def animate_trajs_coloured(ds, video_path: str, exp_name: str, batch_num: int, c
     cap.release()
     return
 
+def animate_neighbours(ds, nbrs, interaction: str, inter_param, fid: int, video_path: str, exp_name: str, batch_num: int, buffer = 150, start_frame = 0, end_frame = -1, interval = 50):
+
+    inter_param = str(inter_param)
+
+    # Open video and count frames
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    # Manually find start and end frame in dataset if not specified
+    first_frame = int(ds.frame.min())
+    last_frame = int(ds.frame.max())
+    num_frames = last_frame - first_frame + 1
+
+    if end_frame < 0:
+        end_frame = num_frames
+
+    # Check appropriate start and end frame inputs
+    assert start_frame < num_frames, f"Start frame is too large for the number of frames for this batch, which is {num_frames}."
+    assert end_frame <= num_frames, f"End frame is too large for the number of frames for this batch, which is {num_frames}."
+    assert start_frame < end_frame, f"Start frame must be less than end frame."
+
+    # Define frames in animation (consecutive)
+    start_frame += first_frame
+    end_frame += first_frame
+    frames = np.arange(start_frame, end_frame)
+
+    # Subset dataset
+    ds_sub = ds.sel(frame = slice(start_frame, end_frame - 1))
+    n_ids = len(ds_sub.id)
+
+    # Initialize figure
+    fig, ax = plt.subplots()
+    ax.set_axis_off()
+
+    print('starting')
+
+    # Initialize scatter plot artist outside update function
+    # fid_pos = np.array([ds_sub.sel(frame=start_frame, id=fid)['x_sg'].values, ds_sub.sel(frame=start_frame, id=fid)['y_sg'].values])
+    # nbr_vals = nbrs[interaction][inter_param]['nbrs']['values']
+    # nbr_offsets = nbrs[interaction][inter_param]['nbrs']['offsets']
+    # nbr_ids = nbr_vals[nbr_offsets[start_frame*n_ids + fid]]
+    # nbr_pos = np.array([[ds_sub.sel(frame=start_frame, id=nbr_id)['x_sg'].values, ds_sub.sel(frame=start_frame, id=nbr_id)['y_sg'].values] for nbr_id in nbr_ids])
+
+    scat = ax.scatter([], [], c=[], s=20, marker = 'x')
+    scat.set_zorder(2)
+
+    ret, frame = cap.read()
+    if not ret:
+        raise ValueError("Could not read first video frame.")
+    img_artist = ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    img_artist.set_zorder(1)
+
+    def init():
+        scat.set_offsets(np.empty((0, 2)))
+        return [img_artist, scat]
+
+    def update(idx):
+        frame_num = frames[idx]
+
+        # Show frame of video
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+        ret, frame = cap.read()
+        if not ret:
+            return [img_artist, scat]
+        img_artist.set_data(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+        # Get positions and tracklet lengths for current frame
+        frame_data = ds_sub.sel(frame=frame_num)
+
+        # Find focal position
+        fid_pos = np.array([frame_data.sel(id=fid)['x_sg'].values, frame_data.sel(id=fid)['y_sg'].values])
+
+        # Find nbr positions
+        offset_idx = int(idx*n_ids + fid)
+        nbr_vals = nbrs[interaction][inter_param]['nbrs']['values']
+        nbr_offsets = nbrs[interaction][inter_param]['nbrs']['offsets'].astype(int)
+        nbr_ids = nbr_vals[nbr_offsets[offset_idx]:nbr_offsets[offset_idx+1]].astype(int)
+        # print(nbr_ids)
+        nbr_pos = np.array([[frame_data.sel(id=nbr_id)['x_sg'].values, frame_data.sel(id=nbr_id)['y_sg'].values] for nbr_id in nbr_ids])
+        
+        # Set new axis limits centered around focal
+        try:
+            ax.set_xlim(fid_pos[0] - buffer, fid_pos[0] + buffer)
+            ax.set_ylim(fid_pos[1] - buffer, fid_pos[1] + buffer)
+
+            # Update scatter plot
+            pts = np.vstack([fid_pos.reshape(1, 2), nbr_pos])
+            scat.set_offsets(pts)
+            colours = ['blue'] + ['red'] * len(nbr_ids)
+            scat.set_color(colours)
+        except:
+            scat.set_offsets([np.nan, np.nan])
+            scat.set_color([])
+
+        if idx % 100 == 0:
+            print(f'Processed frame {idx+1}/{len(frames)}')
+        
+        return [img_artist, scat]
+
+    ani = FuncAnimation(fig, update, frames=len(frames), init_func=init, interval=interval, blit=False, repeat=False)
+    ani.save(f'plots/{exp_name}/batch_{batch_num}/nbrs_focal_{fid}_inter_{interaction}_{inter_param}.gif')
+    cap.release()
+    return
+
 '''_____________________________________________________PLOT FUNCTIONS____________________________________________________________'''
 def plot_tracks(ds, t_slice, exp_name: str, batch_num: int):
 
@@ -208,7 +313,7 @@ def plot_smoothed_coords(ds, id: int, speed_names: list, t_slice, exp_name: str,
     # print(ds['v_sg'].isel(id=id, frame=t_slice).values)
 
     for i in range(2):
-        axs[i].plot(ds['frame'].isel(frame=t_slice), ds[coords[i]].isel(id=id, frame=t_slice), label='Original')
+        axs[i].plot(ds['frame'].isel(frame=t_slice), ds[coords[i] + '_raw'].isel(id=id, frame=t_slice), label='Original')
         axs[i].plot(ds['frame'].isel(frame=t_slice), ds[coords[i]+'_high_ord'].isel(id=id, frame=t_slice), label='Smoothed', linestyle='--')
         axs[i].set_xlabel('Frame', fontsize = 17)
         axs[i].set_ylabel(coords[i], fontsize = 17)

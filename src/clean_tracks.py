@@ -45,8 +45,8 @@ def interpolate_small_gaps(x, y, missing, max_gap=3, max_dist=10):
 
     return x, y, missing
 
-def sg_derivative(x, window_length=7, polyorder=2, deriv=0, delta=1.0):
-    """NaN-tolerant Savitzky-Golay derivative for 1D array (frame axis)."""
+def sg_nantolerant(x, window_length=7, polyorder=2, deriv=0, delta=1.0):
+    """NaN-tolerant Savitzky-Golay for 1D array (frame axis)."""
     x = np.asarray(x, dtype=float)
     out = np.full_like(x, np.nan)
     notnan = ~np.isnan(x)
@@ -63,13 +63,11 @@ def sg_derivative(x, window_length=7, polyorder=2, deriv=0, delta=1.0):
     for s, e in zip(starts, ends):
         seg = x[s:e]
         n = len(seg)
-        if n < 3:  # too short: fallback to finite difference or copy
-            if n == 1:
-                out[s:e] = np.nan
-            else:
-                # central diff for n==2
-                out[s:e] = np.gradient(seg, delta)
+
+        if n < 3:  # too short: fallback to copy
+            out[s:e] = seg
             continue
+
         wl = min(window_length, n if (n % 2 == 1) else n - 1)
         if wl < polyorder + 2:
             wl = polyorder + 2
@@ -80,9 +78,39 @@ def sg_derivative(x, window_length=7, polyorder=2, deriv=0, delta=1.0):
         try:
             out[s:e] = savgol_filter(seg, window_length=wl, polyorder=polyorder, deriv=deriv, delta=delta, mode = 'interp')
         except Exception:
-            # fallback: numerical gradient
-            print('Error using savgol_filter, using np.gradient instead.')
-            out[s:e] = np.gradient(seg, delta)
+            # fallback: unsmoothed data
+            print('Error using savgol_filter, using raw data instead.')
+            out[s:e] = seg
+
+    return out
+
+def butter_nantolerant(x, dt=1, filter_order=2, cutoff_freq=0.5):
+    """NaN-tolerant Butterworth filter for 1D array (frame axis)."""
+    x = np.asarray(x, dtype=float)
+    out = np.full_like(x, np.nan)
+    notnan = ~np.isnan(x)
+
+    # find contiguous segments of not-nan
+    edges = np.diff(notnan.astype(int))
+    starts = np.where(edges == 1)[0] + 1
+    ends = np.where(edges == -1)[0] + 1
+    if notnan[0]:
+        starts = np.r_[0, starts]
+    if notnan[-1]:
+        ends = np.r_[ends, len(x)]
+
+    for s, e in zip(starts, ends):
+        seg = x[s:e]
+        n = len(seg)
+        if n < 10:  # too short: fallback to copy
+            out[s:e] = seg
+            continue
+
+        # try:
+        out[s:e], _ = pynumdiff.smooth_finite_difference.butterdiff(seg, dt=dt, filter_order=filter_order, cutoff_freq=cutoff_freq)
+        # except Exception:
+        #     print('Error using butterworth filter, using raw data instead.')
+        #     out[s:e] = seg
 
     return out
 
@@ -91,24 +119,27 @@ def compute_speed(ds, speed_dict):
     speed_types = list(speed_dict.keys())
 
     if 'raw' in speed_types or 'moving_avg' in speed_types or 'moving_med' in speed_types: # Compute instantaneous speed from raw positions
-        ds['vx_raw'], ds['vy_raw'] = ds['x_raw'].diff(dim = 'frame'), ds['y_raw'].diff(dim = 'frame')
-        ds['v_raw'] = np.hypot(ds['vx_raw'], ds['vy_raw']) / ds['frame'].diff(dim = 'frame')
+        ds['v_raw'] = np.hypot(ds['x_raw'].diff(dim = 'frame'), ds['y_raw'].diff(dim = 'frame'))
 
     if 'high_ord' in speed_types: # Compute high-order derivatives
         high_ord_params = speed_dict['high_ord']
-        ds['x_high_ord'], ds['vx_high_ord'] = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
-        ds['y_high_ord'], ds['vy_high_ord'] = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
+        ds['x_high_ord'], vx_high_ord = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
+        ds['y_high_ord'], vy_high_ord = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
         
         # Get speed magnitude
-        ds['v_high_ord'] = np.hypot(ds['vx_high_ord'], ds['vy_high_ord'])
+        ds['v_high_ord'] = np.hypot(vx_high_ord, vy_high_ord)
 
     if 'moving_avg' in speed_types: # Compute moving average speed
-        moving_params = speed_dict['moving']
-        ds['v_moving_avg'] = ds['v_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
+        moving_params = speed_dict['moving_avg']
+        ds['x_moving_avg'] = ds['x_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
+        ds['y_moving_avg'] = ds['y_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
+        ds['v_moving_avg'] = np.hypot(ds['x_moving_avg'].diff(dim='frame'), ds['y_moving_avg'].diff(dim='frame'))
 
     if 'moving_med' in speed_types: # Compute moving median speed
         moving_params = speed_dict['moving_med']
-        ds['v_moving_med'] = ds['v_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
+        ds['x_moving_med'] = ds['x_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
+        ds['y_moving_med'] = ds['y_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
+        ds['v_moving_med'] = np.hypot(ds['x_moving_med'].diff(dim='frame'), ds['y_moving_med'].diff(dim='frame'))
 
     if 'sg' in speed_types: # Compute Savitzky-Golay smoothed speed
         sg_params = speed_dict['sg']
@@ -116,17 +147,20 @@ def compute_speed(ds, speed_dict):
         sg_params['deriv'] = 0
 
         # Smooth x and y (vectorized over ids)
-        ds['x_sg'] = xr.apply_ufunc(sg_derivative, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs=sg_params, dask = 'parallelized')
-        ds['y_sg'] = xr.apply_ufunc(sg_derivative, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs=sg_params, dask = 'parallelized')
-
-        # Get velocity
-        sg_params['deriv'] = 1
-        ds['vx_sg'] = xr.apply_ufunc(sg_derivative, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs = sg_params, dask = 'parallelized')
-        ds['vy_sg'] = xr.apply_ufunc(sg_derivative, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs = sg_params, dask = 'parallelized')
+        ds['x_sg'] = xr.apply_ufunc(sg_nantolerant, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs=sg_params, dask = 'parallelized')
+        ds['y_sg'] = xr.apply_ufunc(sg_nantolerant, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs=sg_params, dask = 'parallelized')
 
         # Speed magnitude
-        ds['v_sg'] = np.hypot(ds['vx_sg'], ds['vy_sg'])
+        ds['v_sg'] = np.hypot(ds['x_sg'].diff(dim='frame'), ds['y_sg'].diff(dim='frame'))
 
+    if 'butter' in speed_types: # Compute Butterworth filtered speed
+        print('Computing butter')
+        butter_params = speed_dict['butter']
+        ds['x_butter'] = xr.apply_ufunc(butter_nantolerant, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize = True,  kwargs=butter_params, dask = 'parallelized')
+        ds['y_butter'] = xr.apply_ufunc(butter_nantolerant, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize = True,  kwargs=butter_params, dask = 'parallelized')
+
+        # Speed magnitude
+        ds['v_butter'] = np.hypot(ds['x_butter'].diff(dim='frame'), ds['y_butter'].diff(dim='frame'))
     return ds
 
 def exclude_borders(ds, radius): # Sets missing = 1 for individuals outside a circular region and nan for all other variables
@@ -230,23 +264,40 @@ def smooth_circular(ds, smooth_func, speed_dict):
 
     return smoothed
 
+# def compute_theta(ds, speed_dict): # Speeds should be pre-computed
+#     ''' Compute heading direction and instantaneous change in heading direction.'''
+#     speed_types = list(speed_dict.keys())
+
+#     # Compute (smoothed) orientations
+#     ds['theta_raw'] = np.arctan2(ds['vy_raw'], ds['vx_raw']) # Compute theta from high ord data
+
+#     smth_fns = {'high_ord': pynumdiff.finite_difference.finitediff, 'sg': savgol_filter}
+#     for speed in speed_types:
+#         if speed in ['high_ord', 'sg']:
+#             if speed == 'sg':
+#                 speed_dict[speed]['deriv'] = 1 # Ensure first difference is taken
+#             ds[f'vtheta_{speed}'] = smooth_circular(ds, smth_fns[speed], speed_dict[speed])
+
+#         else:
+#             print(f'Warning: {speed} not yet implemented for angular speed.')
+
+#     return ds
+
 def compute_theta(ds, speed_dict): # Speeds should be pre-computed
     ''' Compute heading direction and instantaneous change in heading direction.'''
     speed_types = list(speed_dict.keys())
 
+    def circular_deriv(thetas):
+        unwrapped = np.unwrap(thetas) # Unwrap to remove jumps at ±π
+        v = np.diff(unwrapped) # Differentiate
+        v = (v + np.pi) % (2 * np.pi) - np.pi # Wrap once more to [-π, π]
+        return v
+
     # Compute (smoothed) orientations
-    ds['theta_raw'] = np.arctan2(ds['vy_raw'], ds['vx_raw']) # Compute theta from high ord data
-
-    smth_fns = {'high_ord': pynumdiff.finite_difference.finitediff, 'sg': savgol_filter}
     for speed in speed_types:
-        if speed in ['high_ord', 'sg']:
-            if speed == 'sg':
-                speed_dict[speed]['deriv'] = 1 # Ensure first difference is taken
-            ds[f'vtheta_{speed}'] = smooth_circular(ds, smth_fns[speed], speed_dict[speed])
-
-        else:
-            print(f'Warning: {speed} not yet implemented for angular speed.')
-
+        ds[f'theta_{speed}'] = np.arctan2(ds[f'y_{speed}'].diff(dim='frame'), ds[f'x_{speed}'].diff(dim='frame'))
+        # ds[f'vtheta_{speed}'] = xr.apply_ufunc(circular_deriv, ds[f'theta_{speed}'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, dask='allowed', output_dtypes=[float])
+    
     return ds
 
 def compute_dist_from_center(ds, center=(1920/2, 1920/2)):

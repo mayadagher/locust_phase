@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from visualize_preprocessed import animate_trajs_coloured
+from helper_fns import *
 
 '''_____________________________________________________VISUALIZATION FUNCTIONS____________________________________________________________'''
 
@@ -17,33 +18,14 @@ def activity_over_time(ds, activity_thresh: float, exp_name: str, batch_num: int
     plt.xlabel('Frame')
     plt.ylabel('Individuals active (%)') # Assumes TReX at one point tracked all individuals
     plt.title(f'Activity threshold: {round(activity_thresh, 4)}')
-    plt.savefig(f'pre_process_plots/{exp_name}/batch_{batch_num}/activity_over_time.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_over_time.png')
 
 def active_inactive_bout_lengths(ds, activity_thresh: float, exp_name: str, batch_num: int):
     '''Compute and visualize active/inactive bout lengths.'''
-    
-    # Count lengths of active and inactive bouts
-    def count_runs(arr):
-        """Count lengths of consecutive identical non-nan values."""
-        x = arr.values.ravel()
-        x = x[~np.isnan(x)]
 
-        # If empty:
-        if x.size == 0:
-            raise ValueError('Array is empty.')
+    active_lengths = run_lengths_labeled(ds['active_bout_id'])
+    inactive_lengths = run_lengths_labeled(ds['inactive_bout_id'])
 
-        # Find run boundaries
-        changes = np.diff(x) != 0
-        idx = np.concatenate(([0], np.where(changes)[0] + 1, [len(x)]))
-
-        # Run lengths:
-        lengths = np.diff(idx).astype(int)
-
-        return lengths
-
-    active_lengths = count_runs(ds['active_bout_id'])
-    inactive_lengths = count_runs(ds['inactive_bout_id'])
-    
     # Generate histograms of active and inactive bouts
     bins = np.logspace(0, np.log10(max(np.max(active_lengths), np.max(inactive_lengths))), 15)
 
@@ -56,11 +38,63 @@ def active_inactive_bout_lengths(ds, activity_thresh: float, exp_name: str, batc
     plt.title(f'Activity threshold: {round(activity_thresh, 4)}')
     plt.legend()
     plt.grid(axis='y')
-    plt.savefig(f'pre_process_plots/{exp_name}/batch_{batch_num}/bout_lengths.png') # We expect there to be fewer long active bouts due to tracking error
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/bout_lengths.png') # We expect there to be fewer long active bouts due to tracking error
 
-# def active_inactive_psd(ds, speed_names: list, activity_thresh: float, exp_name: str, batch_num: int):
-#     '''Look at the power spectral density of x and y during active and inactive bouts for the raw data, as well as smoothed data.'''
+def active_inactive_bout_lengths_quants(active_lengths, inactive_lengths, f_min, quantiles: list, min_tracklet_length: int, exp_name: str, batch_num: int):
+    '''Compute and visualize active/inactive bout lengths.'''
+    
+    # Use bins that align with log ticks
+    max_val = max(np.max(active_lengths), np.max(inactive_lengths))
+    max_order = np.floor(np.log10(max_val))
+    max_bin = round(max_val, -int(max_order))
+    if max_bin < max_val:
+        max_bin += 10**(int(max_order))
+    
+    bins = [np.linspace(10**(i), min(10**(i + 1) - 10**(i), max_bin), min(9, int(max_bin/10**(i)))) for i in range(int(max_order) + 1)]
+    bins = np.concatenate([arr for arr in bins])
 
-#     active_bouts, inactive_bouts = compute_bouts(ds) # Computes active and inactive bouts using activity threshold (computed on some smoothed data... should it be raw data?)
+    # Generate histograms of active and inactive bouts
+    plt.hist(active_lengths, bins=bins, alpha=0.7, label = 'Active')
+    plt.hist(inactive_lengths, bins=bins, alpha=0.7, label = 'Inactive')
+    plt.xlabel('Length of bouts')
+    plt.ylabel('Counts')
+    plt.xscale('log')
+    plt.title(f'Activity quantiles: {[round(q, 2) for q in quantiles]}')
+    plt.axvline(min_tracklet_length, color='k', linestyle='--', label = 'Minimum tracklet length')
+    plt.legend()
+    plt.grid(axis='y')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_quantiles/bout_lengths_quants_{round(quantiles[0], 2)}_{round(quantiles[1], 2)}_fmin_{f_min}.png') # We expect there to be fewer long active bouts due to tracking error
 
-    # Compute FFT for active and inactive bouts
+def plot_psds(psd_dict, f_min, exp_name: str, batch_num: int, smooth_names: list, actives = False, quants = None, normalize = False):
+    if actives:
+        data = []
+        data.append(psd_dict[str(f_min)]['active'][str(quants)])
+        data.append(psd_dict[str(f_min)]['inactive'][str(quants)])
+
+    else:
+        data = []
+        data.append(psd_dict[str(f_min)]['all'])
+
+    _, ax = plt.subplots(len(smooth_names), 2, figsize=(10, round(1.5*len(smooth_names))), sharex = True, sharey = True)
+
+    for smooth_i, smooth_name in enumerate(smooth_names):
+        for i in range(2): # x/y
+            coord = ['x', 'y'][i]
+            for j, data_j in enumerate(data):
+                d = data_j[coord][smooth_name]
+                if normalize:
+                    d['mean'] = d['mean'] / d['mean'].sum()
+
+                ax[smooth_i, i].plot(d['freq'], d['mean'], label = ['Active', 'Inactive'][j])
+
+                ax[smooth_i, i].set_xscale('log')
+                ax[smooth_i, i].set_yscale('log')
+                ax[smooth_i, i].set_xlabel('Frequency (Hz)')
+                ax[smooth_i, i].set_ylabel('Power')
+                ax[smooth_i, i].set_title(coord + ' ' + smooth_name)
+                if actives:
+                    ax[smooth_i, i].legend()
+
+    plt.tight_layout()
+    fig_name = f'plots/{exp_name}/batch_{batch_num}/psd_fmin_{f_min}_active_quants_{quants}.png' if actives else f'plots/{exp_name}/batch_{batch_num}/psd_all_fmin_{f_min}.png'
+    plt.savefig(fig_name)
