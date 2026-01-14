@@ -67,8 +67,8 @@ if __name__ == "__main__":
     # print('Plotted speed histograms.')
 
     # PLOT SMOOTHED COORDINATES
-    plot_smoothed_coords(ds, id = 0, speed_names = ['high_ord', 'moving_avg', 'moving_med', 'sg', 'butter'], t_slice = slice(0, 200), exp_name = exp_name, batch_num = batch_num)
-    print('Plotted smoothed coordinates.')
+    # plot_smoothed_coords(ds, id = 0, speed_names = ['high_ord', 'moving_avg', 'moving_med', 'sg', 'butter'], t_slice = slice(0, 200), exp_name = exp_name, batch_num = batch_num)
+    # print('Plotted smoothed coordinates.')
 
     # PLOT HISTOGRAMS OF TRACK LENGTHS
     # plot_tracklet_lengths_hist(ds_raw, speed_dict, interp_dict, radius=800, exp_name = exp_name, batch_num = batch_num)
@@ -93,7 +93,7 @@ if __name__ == "__main__":
     # validate_quantiles(ds, f_min=fmin, inactive_quant=quant_low, active_quant=quant_high, exp_name=exp_name, batch_num=batch_num, plot=True)
 
     # COMPUTES PSDS
-    # compute_activity_psd(ds, f_min=0.5, inactive_quant=quant_low, active_quant=quant_high, exp_name=exp_name, batch_num=batch_num, smooth_list = ['high_ord', 'moving_avg', 'moving_med', 'sg', 'butter'])
+    # compute_activity_psd(ds, f_min=0.2, inactive_quant=quant_low, active_quant=quant_high, exp_name=exp_name, batch_num=batch_num, smooth_list = ['high_ord', 'moving_avg', 'moving_med', 'sg', 'butter'])
     # compute_total_psd(ds, fmin, exp_name, batch_num, smooth_list = ['high_ord', 'moving_avg', 'moving_med', 'sg', 'butter'])
     # print('PSDs computed.')
 
@@ -103,7 +103,21 @@ if __name__ == "__main__":
     # print('PSD data loaded.')
 
     # PLOT PSDS
-    # plot_psds(psds, f_min = 0.5, exp_name=exp_name, batch_num=batch_num, smooth_names = ['high_ord', 'moving_avg', 'moving_med', 'sg', 'butter'], actives = True, normalize = False, quants = [quant_low, quant_high])
+    # plot_psds(psds, f_min = 0.2, exp_name=exp_name, batch_num=batch_num, smooth_names = ['high_ord', 'moving_avg', 'moving_med', 'sg', 'butter'], actives = True, normalize = True, quants = [quant_low, quant_high])
+
+    # PLOT AVERAGED AUTOCORELLATION FOR ALL INDIVIDUALS
+    # tau_max = 100
+    # speed_name = 'v_butter'
+    # valid_trajs = list_long_tracklets(ds[speed_name].where(~np.isnan(ds[speed_name])), min_tracklet_length=5*tau_max)
+    # autocorrs, taus = compute_autocorr_tracklets(valid_trajs, tau_max)
+    # plot_autocorr(autocorrs, taus, speed_name = speed_name, exp_name=exp_name, batch_num=batch_num)
+
+    # PLOT AVERAGED AUTOCORELLATION BY ACTIVITY
+    speed_name = 'v_butter'
+    autocorrs, taus = compute_activity_autocorr(ds, [quant_low, quant_high], speed_name, tau_max=50)
+    # plot_activity_autocorr(autocorrs, taus, [quant_low, quant_high], speed_name = speed_name, exp_name=exp_name, batch_num=batch_num)
+    powers, freq = compute_activity_autocorr_psd(autocorrs, fs=5, f_min=0.5)
+    plot_activity_autocorr_psd(powers, freq, [quant_low, quant_high], speed_name = speed_name, exp_name=exp_name, batch_num=batch_num)
 
     # ANIMATE NEIGHBOURS
     # nbrs = load_neighbours_hdf5(f'./preprocessed/{exp_name}/batch_{batch_num}/nbrs.h5')

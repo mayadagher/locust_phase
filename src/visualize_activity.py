@@ -96,5 +96,42 @@ def plot_psds(psd_dict, f_min, exp_name: str, batch_num: int, smooth_names: list
                     ax[smooth_i, i].legend()
 
     plt.tight_layout()
-    fig_name = f'plots/{exp_name}/batch_{batch_num}/psd_fmin_{f_min}_active_quants_{quants}.png' if actives else f'plots/{exp_name}/batch_{batch_num}/psd_all_fmin_{f_min}.png'
+    fig_name = f'plots/{exp_name}/batch_{batch_num}/psd_fmin_{f_min}_active_quants_{quants}_norm_{int(normalize)}.png' if actives else f'plots/{exp_name}/batch_{batch_num}/psd_all_fmin_{f_min}.png'
     plt.savefig(fig_name)
+
+def plot_autocorr(autocorrs, taus, speed_name : str, exp_name: str, batch_num: int):
+    plt.figure(figsize=(10, 5))
+
+    plt.plot(taus, autocorrs)
+    plt.xlabel('Lag (frames)')
+    plt.ylabel('Autocorrelation')
+    plt.grid(True)
+    plt.title(speed_name)
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/autocorr_all.png')
+
+def plot_activity_autocorr(autocorrs, taus, quants: list, speed_name: str, exp_name: str, batch_num: int):
+    plt.figure(figsize=(10, 5))
+
+    for i, autocorr in enumerate(autocorrs):
+        plt.plot(taus, autocorr, label = ['Inactive', 'Active'][i])
+
+    plt.xlabel('Lag (frames)')
+    plt.ylabel('Autocorrelation')
+    plt.grid(True)
+    plt.title(speed_name)
+    plt.legend()
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/autocorr_activity_quants_{quants}.png')
+
+def plot_activity_autocorr_psd(powers, freq, quants: list, speed_name: str, exp_name: str, batch_num: int):
+
+    for i, power in enumerate(powers):
+        plt.plot(freq, power, label = ['Inactive', 'Active'][i])
+
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Power')
+    plt.xscale('log')
+    plt.yscale('log')
+    plt.grid(True)
+    plt.title('Autocorrelation of ' +speed_name)
+    plt.legend()
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/autocorr_psd_{speed_name}_activity_quants_{quants}.png')
