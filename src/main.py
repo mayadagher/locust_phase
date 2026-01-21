@@ -19,10 +19,11 @@ threshes = [0.3352, 0.3243] # High order diff speed
 
 # Smoothing and interpolating parameters
 # speed_dict = {'raw': None, 'moving_avg': {'window_length': 5, 'center': True}, 'moving_med': {'window_length': 5, 'center': True}, 'sg': {'window_length': 5, 'polyorder': 2, 'deriv': 0, 'delta': 1.0}}
-speed_dict = {'raw': None, 'high_ord':{'dt': 1, 'num_iterations': 1, 'order': 4}, 'moving_avg': {'window_length': 3, 'center': True}, 'moving_med': {'window_length': 3, 'center': True}, 
-              'sg': {'window_length': 3, 'polyorder': 2, 'deriv': 0, 'delta': 1.0}, 'butter': {'dt': 1, 'filter_order': 2, 'cutoff_freq': 0.5}}
-interp_dict= {'max_gap': 5, 'max_dist': 10}
-fill_gaps = True
+# speed_dict = {'raw': None, 'high_ord':{'dt': 1, 'num_iterations': 1, 'order': 4}, 'moving_avg': {'window_length': 3, 'center': True}, 'moving_med': {'window_length': 3, 'center': True}, 
+            #   'sg': {'window_length': 3, 'polyorder': 2, 'deriv': 0, 'delta': 1.0}, 'butter': {'dt': 1, 'filter_order': 2, 'cutoff_freq': 0.5}}
+speed_dict = {'raw': None, 'high_ord':{'dt': 1, 'num_iterations': 1, 'order': 4}, 'butter': {'dt': 1, 'filter_order': 2, 'cutoff_freq': 0.3}, 'spline': {'degree': 3, 's': 1}}
+interp_dict= {'max_gap': 1, 'max_dist': 0.5}
+fill_gaps = False
 
 # Visualizing and animating parameters
 vid_path = './tracking/trex_inputs/20230329.mp4'
@@ -60,18 +61,33 @@ if __name__ == "__main__":
     ds_load_name = f'./preprocessed/{exp_name}/batch_{batch_num}/traj_data' + '.h5'
     ds = load_preprocessed_data(ds_load_name)
     print('Pre-processed data loaded.')
-    # print(ds.data_vars)
+    print(ds.data_vars)
+    # print(ds.isel(id=0, frame=slice(0, 300))['x_raw'])
+    # print(ds.isel(id=0, frame=slice(0, 300))['x_butter'])
+
+    # PLOT TRACKS
+    # plot_tracks(ds, ids = [0, 1], end_frame = 300, exp_name = exp_name, batch_num = batch_num)
+
+    # PLOT ORIENTATION AND ANGULAR SPEED OVER TIME FOR A COUPLE OF IDS
+    # plot_ang_speed(ds, speed_name = 'spline', exp_name = exp_name, batch_num = batch_num, end_frame = 300)
 
     # PLOT SPEED HISTOGRAMS
-    # plot_speed_hists(ds, speed_names = ['raw', 'high_ord', 'sg'], exp_name = exp_name, batch_num = batch_num, fit_speed = False)
+    # plot_speed_hists(ds, speed_names = ['raw', 'high_ord', 'butter'], exp_name = exp_name, batch_num = batch_num, fit_speed = False)
     # print('Plotted speed histograms.')
 
     # PLOT SMOOTHED COORDINATES
-    # plot_smoothed_coords(ds, id = 0, speed_names = ['high_ord', 'moving_avg', 'moving_med', 'sg', 'butter'], t_slice = slice(0, 200), exp_name = exp_name, batch_num = batch_num)
+    # plot_smoothed_coords(ds, id = 0, speed_names = ['high_ord', 'butter', 'spline'], t_slice = slice(0, 300), exp_name = exp_name, batch_num = batch_num)
     # print('Plotted smoothed coordinates.')
 
-    # PLOT HISTOGRAMS OF TRACK LENGTHS
-    # plot_tracklet_lengths_hist(ds_raw, speed_dict, interp_dict, radius=800, exp_name = exp_name, batch_num = batch_num)
+    # PLOT CORRELATION BETWEEN SPEED AND TRACKLET LENGTH
+    # corr_speed_tracklet_length(ds, speed_name='high_ord', exp_name=exp_name, batch_num=batch_num)
+    # corr_speed_pos_in_tracklet(ds, speed_name='high_ord', exp_name=exp_name, batch_num=batch_num)
+
+    # PLOT SINGLE HISTOGRAM OF SMOOTHED TRACKLET LENGTHS
+    # plot_single_tracklet_lengths(ds, speed_name='spline', exp_name=exp_name, batch_num=batch_num)
+
+    # PLOT MULTIPLE HISTOGRAMS OF TRACK LENGTHS
+    # plot_tracklet_lengths_hist(ds_raw, speed_dict, interp_dict, radius=960, exp_name = exp_name, batch_num = batch_num)
     # print('Plotted tracklet length histograms.')
 
     # PLOT ORIENTATIONS AND ANGULAR SPEED OVER TIME
@@ -79,15 +95,15 @@ if __name__ == "__main__":
     # print('Plotted orientations and angular speed over time.')
 
     # PLOT NUMBER OF TRACKLETS OVER TIME
-    # plot_num_tracklets_over_time(ds, exp_name = exp_name, batch_num = batch_num)
-    # print('Plotted number of tracklets over time.')
+    plot_num_tracklets_over_time(ds, exp_name = exp_name, batch_num = batch_num)
+    print('Plotted number of tracklets over time.')
 
     # ANIMATE TRACKLET LENGTHS
     # animate_trajs_coloured(ds, vid_path, exp_name = exp_name, batch_num = batch_num, colours=ds['tracklet_length'], cbar_name='Tracklet length', start_frame=0, end_frame=-1, interval=50)
     # print('Animated tracklet lengths.')
 
     # COMPUTE NEIGHBOURS
-    # create_nbrs_h5(ds, inter_dict, exp_name, batch_num, do_regions = True, num_regions=16)
+    # create_nbrs_h5(ds, inter_dict, exp_name, batch_num, do_regions = False)
 
     # VALIDATE ACTIVITY QUANTILES
     # validate_quantiles(ds, f_min=fmin, inactive_quant=quant_low, active_quant=quant_high, exp_name=exp_name, batch_num=batch_num, plot=True)
@@ -113,15 +129,15 @@ if __name__ == "__main__":
     # plot_autocorr(autocorrs, taus, speed_name = speed_name, exp_name=exp_name, batch_num=batch_num)
 
     # PLOT AVERAGED AUTOCORELLATION BY ACTIVITY
-    speed_name = 'v_butter'
-    autocorrs, taus = compute_activity_autocorr(ds, [quant_low, quant_high], speed_name, tau_max=50)
+    # speed_name = 'v_butter'
+    # autocorrs, taus = compute_activity_autocorr(ds, [quant_low, quant_high], speed_name, tau_max=50)
     # plot_activity_autocorr(autocorrs, taus, [quant_low, quant_high], speed_name = speed_name, exp_name=exp_name, batch_num=batch_num)
-    powers, freq = compute_activity_autocorr_psd(autocorrs, fs=5, f_min=0.5)
-    plot_activity_autocorr_psd(powers, freq, [quant_low, quant_high], speed_name = speed_name, exp_name=exp_name, batch_num=batch_num)
+    # powers, freq = compute_activity_autocorr_psd(autocorrs, fs=5, f_min=0.5)
+    # plot_activity_autocorr_psd(powers, freq, [quant_low, quant_high], speed_name = speed_name, exp_name=exp_name, batch_num=batch_num)
 
     # ANIMATE NEIGHBOURS
     # nbrs = load_neighbours_hdf5(f'./preprocessed/{exp_name}/batch_{batch_num}/nbrs.h5')
-    # print(nbrs)
-    # animate_neighbours(ds, nbrs, interaction = 'topo', inter_param = 5, fid = 0, end_frame = 500, video_path = vid_path, exp_name = exp_name, batch_num = batch_num, buffer = 80)
+    # # print(nbrs)
+    # animate_neighbours(ds, nbrs, interaction = 'topo', inter_param = 5, fid = 1, end_frame = 300, video_path = vid_path, speed_name = 'spline', exp_name = exp_name, batch_num = batch_num, buffer = 80)
 
     pass

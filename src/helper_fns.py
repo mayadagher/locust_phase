@@ -6,6 +6,23 @@ import xarray as xr
 
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
 
+def get_frame_slice(ds: xr.Dataset, start = 0, end = -1):
+    '''Return slice of frames. Helpful for batches that aren't 0.'''
+
+    first_frame = int(ds.frame.min())
+    last_frame = int(ds.frame.max())
+    num_frames = last_frame - first_frame + 1
+
+    if end < 0:
+        end = num_frames
+
+    # Check appropriate start and end frame inputs
+    assert start < num_frames, f"Start frame is too large for the number of frames for this batch, which is {num_frames}."
+    assert end <= num_frames, f"End frame is too large for the number of frames for this batch, which is {num_frames}."
+    assert start < end, f"Start frame must be less than end frame."
+
+    return np.arange(first_frame + start, first_frame + end)
+
 def run_lengths(arr, val = None):
     """
     Return lengths of either:
@@ -124,3 +141,45 @@ def list_long_tracklets(da: xr.DataArray, min_tracklet_length: int = 1):
     print('Number of eligible tracklets:', len(all_valid_trajs), flush=True)
 
     return all_valid_trajs
+
+def within_tracklet_pos(arr: np.ndarray) -> np.ndarray:
+    """
+    Parameters
+    ----------
+    arr : np.ndarray
+        Shape (id, frame), NaN-separated tracklets within each row.
+
+    Returns
+    -------
+    rel_pos : np.ndarray
+        Same shape as arr, with positions relative to the end of each tracklet.
+        (e.g. -10, ..., -1 for the last point in a tracklet)
+    """
+
+    arr = np.asarray(arr)
+    n_id, n_frame = arr.shape
+
+    out = np.full_like(arr, np.nan, dtype=float)
+
+    for i in range(n_id):
+        valid = ~np.isnan(arr[i])
+
+        if not np.any(valid):
+            continue
+
+        # Find tracklet boundaries
+        diff = np.diff(valid.astype(int))
+        starts = np.where(diff == 1)[0] + 1
+        ends = np.where(diff == -1)[0] + 1
+
+        if valid[0]:
+            starts = np.r_[0, starts]
+        if valid[-1]:
+            ends = np.r_[ends, n_frame]
+
+        # Assign relative positions
+        for s, e in zip(starts, ends):
+            length = e - s
+            out[i, s:e] = np.arange(-length + 1, 1)
+
+    return out

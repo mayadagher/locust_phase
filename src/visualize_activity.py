@@ -18,7 +18,7 @@ def activity_over_time(ds, activity_thresh: float, exp_name: str, batch_num: int
     plt.xlabel('Frame')
     plt.ylabel('Individuals active (%)') # Assumes TReX at one point tracked all individuals
     plt.title(f'Activity threshold: {round(activity_thresh, 4)}')
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_over_time.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_and_psd/activity_over_time.png')
 
 def active_inactive_bout_lengths(ds, activity_thresh: float, exp_name: str, batch_num: int):
     '''Compute and visualize active/inactive bout lengths.'''
@@ -38,7 +38,7 @@ def active_inactive_bout_lengths(ds, activity_thresh: float, exp_name: str, batc
     plt.title(f'Activity threshold: {round(activity_thresh, 4)}')
     plt.legend()
     plt.grid(axis='y')
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/bout_lengths.png') # We expect there to be fewer long active bouts due to tracking error
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_and_psd/bout_lengths.png') # We expect there to be fewer long active bouts due to tracking error
 
 def active_inactive_bout_lengths_quants(active_lengths, inactive_lengths, f_min, quantiles: list, min_tracklet_length: int, exp_name: str, batch_num: int):
     '''Compute and visualize active/inactive bout lengths.'''
@@ -63,7 +63,7 @@ def active_inactive_bout_lengths_quants(active_lengths, inactive_lengths, f_min,
     plt.axvline(min_tracklet_length, color='k', linestyle='--', label = 'Minimum tracklet length')
     plt.legend()
     plt.grid(axis='y')
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_quantiles/bout_lengths_quants_{round(quantiles[0], 2)}_{round(quantiles[1], 2)}_fmin_{f_min}.png') # We expect there to be fewer long active bouts due to tracking error
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_and_psd/activity_quantiles/bout_lengths_quants_{round(quantiles[0], 2)}_{round(quantiles[1], 2)}_fmin_{f_min}.png') # We expect there to be fewer long active bouts due to tracking error
 
 def plot_psds(psd_dict, f_min, exp_name: str, batch_num: int, smooth_names: list, actives = False, quants = None, normalize = False):
     if actives:
@@ -96,7 +96,7 @@ def plot_psds(psd_dict, f_min, exp_name: str, batch_num: int, smooth_names: list
                     ax[smooth_i, i].legend()
 
     plt.tight_layout()
-    fig_name = f'plots/{exp_name}/batch_{batch_num}/psd_fmin_{f_min}_active_quants_{quants}_norm_{int(normalize)}.png' if actives else f'plots/{exp_name}/batch_{batch_num}/psd_all_fmin_{f_min}.png'
+    fig_name = f'plots/{exp_name}/batch_{batch_num}/activity_and_psd/psd_fmin_{f_min}_active_quants_{quants}_norm_{int(normalize)}.png' if actives else f'plots/{exp_name}/batch_{batch_num}/psd_all_fmin_{f_min}.png'
     plt.savefig(fig_name)
 
 def plot_autocorr(autocorrs, taus, speed_name : str, exp_name: str, batch_num: int):
@@ -107,7 +107,7 @@ def plot_autocorr(autocorrs, taus, speed_name : str, exp_name: str, batch_num: i
     plt.ylabel('Autocorrelation')
     plt.grid(True)
     plt.title(speed_name)
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/autocorr_all.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/autocorr_all_{speed_name}.png')
 
 def plot_activity_autocorr(autocorrs, taus, quants: list, speed_name: str, exp_name: str, batch_num: int):
     plt.figure(figsize=(10, 5))
@@ -120,7 +120,7 @@ def plot_activity_autocorr(autocorrs, taus, quants: list, speed_name: str, exp_n
     plt.grid(True)
     plt.title(speed_name)
     plt.legend()
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/autocorr_activity_quants_{quants}.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_and_psd/autocorr_activity_quants_{quants}.png')
 
 def plot_activity_autocorr_psd(powers, freq, quants: list, speed_name: str, exp_name: str, batch_num: int):
 
@@ -134,4 +134,4 @@ def plot_activity_autocorr_psd(powers, freq, quants: list, speed_name: str, exp_
     plt.grid(True)
     plt.title('Autocorrelation of ' +speed_name)
     plt.legend()
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/autocorr_psd_{speed_name}_activity_quants_{quants}.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/activity_and_psd/autocorr_psd_{speed_name}_activity_quants_{quants}.png')

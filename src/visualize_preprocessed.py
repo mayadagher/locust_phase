@@ -11,6 +11,7 @@ from scipy.optimize import curve_fit
 import scipy.stats as st
 
 from clean_tracks import preprocess_data
+from helper_fns import *
 
 '''_____________________________________________________ANIMATION FUNCTIONS____________________________________________________________'''
 def animate_trajs_lined(ds, video_path: str, exp_name: str, batch_num: int, buffer = 150, start_frame=0, end_frame=-1, interval=50, trail=10):
@@ -24,29 +25,14 @@ def animate_trajs_lined(ds, video_path: str, exp_name: str, batch_num: int, buff
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
 
-    # Manually find start and end frame in dataset if not specified
-    first_frame = int(ds.frame.min())
-    last_frame = int(ds.frame.max())
-    num_frames = last_frame - first_frame + 1
-
-    if end_frame < 0:
-        end_frame = num_frames
-
-    # Check appropriate start and end frame inputs
-    assert start_frame < num_frames, f"Start frame is too large for the number of frames for this batch, which is {num_frames}."
-    assert end_frame <= num_frames, f"End frame is too large for the number of frames for this batch, which is {num_frames}."
-    assert start_frame < end_frame, f"Start frame must be less than end frame."
-
-    # Define frames in animation (consecutive)
-    start_frame += first_frame
-    end_frame += first_frame
-    frames = np.arange(start_frame, end_frame)
+    # Get appropriate frame slice for this batch
+    frames = get_frame_slice(ds, start_frame, end_frame)
 
     # Define ids
     ids = ds.id.values
 
     # Subset dataset
-    ds_sub = ds.sel(frame = slice(start_frame, end_frame - 1))
+    ds_sub = ds.sel(frame = frames)
 
     # Initialize figure
     fig, ax = plt.subplots()
@@ -187,7 +173,7 @@ def animate_trajs_coloured(ds, video_path: str, exp_name: str, batch_num: int, c
     cap.release()
     return
 
-def animate_neighbours(ds, nbrs, interaction: str, inter_param, fid: int, video_path: str, exp_name: str, batch_num: int, buffer = 150, start_frame = 0, end_frame = -1, interval = 50):
+def animate_neighbours(ds: xr.DataArray, nbrs, interaction: str, inter_param, fid: int, video_path: str, speed_name: str, exp_name: str, batch_num: int, buffer = 150, start_frame = 0, end_frame = -1, interval = 50):
 
     inter_param = str(inter_param)
 
@@ -258,7 +244,7 @@ def animate_neighbours(ds, nbrs, interaction: str, inter_param, fid: int, video_
         frame_data = ds_sub.sel(frame=frame_num)
 
         # Find focal position
-        fid_pos = np.array([frame_data.sel(id=fid)['x_sg'].values, frame_data.sel(id=fid)['y_sg'].values])
+        fid_pos = np.array([frame_data.sel(id=fid)[f'x_{speed_name}'].values, frame_data.sel(id=fid)[f'y_{speed_name}'].values])
 
         # Find nbr positions
         offset_idx = int(idx*n_ids + fid)
@@ -266,7 +252,7 @@ def animate_neighbours(ds, nbrs, interaction: str, inter_param, fid: int, video_
         nbr_offsets = nbrs[interaction][inter_param]['nbrs']['offsets'].astype(int)
         nbr_ids = nbr_vals[nbr_offsets[offset_idx]:nbr_offsets[offset_idx+1]].astype(int)
         # print(nbr_ids)
-        nbr_pos = np.array([[frame_data.sel(id=nbr_id)['x_sg'].values, frame_data.sel(id=nbr_id)['y_sg'].values] for nbr_id in nbr_ids])
+        nbr_pos = np.array([[frame_data.sel(id=nbr_id)[f'x_{speed_name}'].values, frame_data.sel(id=nbr_id)[f'y_{speed_name}'].values] for nbr_id in nbr_ids])
         
         # Set new axis limits centered around focal
         try:
@@ -293,42 +279,39 @@ def animate_neighbours(ds, nbrs, interaction: str, inter_param, fid: int, video_
     return
 
 '''_____________________________________________________PLOT FUNCTIONS____________________________________________________________'''
-def plot_tracks(ds, t_slice, exp_name: str, batch_num: int):
+def plot_tracks(ds, ids: np.array, exp_name: str, batch_num: int, start_frame = 0, end_frame = -1,):
+
+    frames = get_frame_slice(ds, start_frame, end_frame)
 
     plt.figure(figsize=(10, 10))
-    for i in ds['id'].values:
-        plt.plot(ds['x_raw'].sel(id=i, frame=t_slice), ds['y_raw'].sel(id=i, frame=t_slice), marker='.', label=f'ID {i}')
+    for i in ids:
+        plt.plot(ds['x_raw'].sel(id=i, frame=frames), ds['y_raw'].sel(id=i, frame=frames), marker='.', label=f'ID {i}')
     plt.xlabel('X Coordinate')
     plt.ylabel('Y Coordinate')
     plt.title('Locust tracks')
     if len(ds['id'].values) <= 10:
         plt.legend()
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/original_tracks.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/original_tracks.png')
 
 def plot_smoothed_coords(ds, id: int, speed_names: list, t_slice, exp_name: str, batch_num: int): # Takes preprocessed xarray.Dataset as input that has raw and sg computed
     # Look at raw versus smooth x and y data for a single id
-    _, axs = plt.subplots(len(speed_names)+2, 1, figsize=(26, 12))
-    coords = ['x', 'y']
-    # print(ds['v_raw'].isel(id=id, frame=t_slice).values)
-    # print(ds['v_sg'].isel(id=id, frame=t_slice).values)
-
-    for i in range(2):
-        axs[i].plot(ds['frame'].isel(frame=t_slice), ds[coords[i] + '_raw'].isel(id=id, frame=t_slice), label='Original')
-        axs[i].plot(ds['frame'].isel(frame=t_slice), ds[coords[i]+'_high_ord'].isel(id=id, frame=t_slice), label='Smoothed', linestyle='--')
-        axs[i].set_xlabel('Frame', fontsize = 17)
-        axs[i].set_ylabel(coords[i], fontsize = 17)
-        # if i !=2:
-        #     axs[i].set_ylim(1200, 1500)
-
+    coords = ['x', 'y', 'v']
+    _, axs = plt.subplots(len(coords), len(speed_names), figsize = (8, 10), sharex = True)
+    
     for i, name in enumerate(speed_names):
-        axs[i + 2].plot(ds['frame'].isel(frame=t_slice), ds['v_raw'].isel(id=id, frame=t_slice), label = 'Original')
-        axs[i + 2].plot(ds['frame'].isel(frame=t_slice), ds['v_' + name].isel(id=id, frame=t_slice), label = 'Smoothed', linestyle = '--')
-        axs[i + 2].set_xlabel('Frame', fontsize = 17)
-        axs[i + 2].set_ylabel(name.capitalize(), fontsize = 17)
-    axs[-1].legend()
+        for j, coord in enumerate(coords):
+            axs[j][i].plot(ds['frame'].isel(frame=t_slice), ds[coord + '_raw'].isel(id=id, frame=t_slice), label = 'Original')
+            axs[j][i].plot(ds['frame'].isel(frame=t_slice), ds[coord + '_' + name].isel(id=id, frame=t_slice), label = 'Smoothed', linestyle = '--')
+            if j == len(coords) - 1:
+                axs[j][i].set_xlabel('Frame', fontsize = 17)
+            if i == 0:
+                axs[j][i].set_ylabel(coord, fontsize = 17)
+            if j == 0:
+                axs[j][i].set_title(name, fontsize = 17)
+    axs[-1][-1].legend()
 
     plt.tight_layout()
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/smoothed_speeds.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/smoothed_speeds.png')
 
 def fit_mixture_model(data, ax=None, opt = True):
     '''
@@ -425,7 +408,7 @@ def fit_mixture_model(data, ax=None, opt = True):
 
         return
 
-def plot_speed_hists(ds, speed_names: list, threshes: list, exp_name: str, batch_num: int, fit_speed: bool = False): # Takes preprocessed xarray.Dataset as input
+def plot_speed_hists(ds, speed_names: list, exp_name: str, batch_num: int, fit_speed: bool = False): # Takes preprocessed xarray.Dataset as input
 
     # Look at all speeds for each ID
     _, axs = plt.subplots(len(speed_names), 1, figsize=(26, 12), sharey = True, sharex = True)
@@ -445,8 +428,8 @@ def plot_speed_hists(ds, speed_names: list, threshes: list, exp_name: str, batch
             sns.histplot(valid_speeds, ax=axs[i], bins=500)
             axs[i].set_title(f'{speed_names[i].capitalize()} speed')
 
-        axs[i].axvline(x=20, color='k', linestyle='--') # Plotting a line when speed is 20 because that is the cut-off in TRex settings for keeping identity (in px/frame)
-        axs[i].axvline(x=threshes[batch_num], color='k', linestyle='--') # Plotting a line at the activity threshold for this batch
+        # axs[i].axvline(x=20, color='k', linestyle='--') # Plotting a line when speed is 20 because that is the cut-off in TRex settings for keeping identity (in px/frame)
+        # axs[i].axvline(x=threshes[batch_num], color='k', linestyle='--') # Plotting a line at the activity threshold for this batch
     
     # plt.yscale('log')
     # plt.xscale('log')
@@ -454,7 +437,37 @@ def plot_speed_hists(ds, speed_names: list, threshes: list, exp_name: str, batch
     plt.ylabel('Frequency')
     plt.tight_layout()
 
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/speed_histograms.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/speed_histograms.png')
+
+def corr_speed_tracklet_length(ds, speed_name: str, exp_name: str, batch_num: int):
+    plt.figure(figsize=(10, 10))
+
+    plt.plot(ds[f'v_{speed_name}'].values.ravel(), ds['tracklet_length'].values.ravel(), 'o', markersize=1)
+    plt.xlabel('Speed')
+    plt.ylabel('Tracklet length')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/corr_speed_tracklet_length_{speed_name}.png')
+
+def corr_speed_pos_in_tracklet(ds, speed_name: str, exp_name: str, batch_num: int):
+    plt.figure(figsize=(10, 10))
+
+    rel_pos = within_tracklet_pos(ds[f'v_{speed_name}'].values)
+ 
+    plt.plot(ds[f'v_{speed_name}'].values.ravel(), rel_pos.flatten(), 'o', markersize=1)
+    plt.xlabel('Speed', fontsize = 17)
+    plt.ylabel('Position in tracklet relative to its end', fontsize = 17)  
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/corr_speed_pos_in_tracklet_{speed_name}.png')
+
+def plot_single_tracklet_lengths(ds, speed_name: str, exp_name: str, batch_num: int):
+    plt.figure(figsize=(10, 10))
+
+    # Get tracklet lengths
+    tracklet_lengths = run_lengths(ds[f'v_{speed_name}'].values)
+
+    # Plot histogram of tracklet lengths
+    plt.hist(tracklet_lengths, bins=15)
+    plt.xlabel('Tracklet length')
+    plt.ylabel('Frequency')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/tracklet_lengths_{speed_name}.png')
 
 def plot_tracklet_lengths_hist(ds_raw, speed_dict: dict, interp_dict: dict, radius: float, exp_name: str, batch_num: int, n_bins = 15):
 
@@ -509,26 +522,45 @@ def plot_tracklet_lengths_hist(ds_raw, speed_dict: dict, interp_dict: dict, radi
     plt.xscale('log')
     plt.yscale('log')
     plt.tight_layout()
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/tracklet_length_hists/rad_{str(int(radius))}.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/tracklet_length_hists/rad_{str(int(radius))}.png')
 
-def plot_ang_speed(ds, t_slice, exp_name: str, batch_num: int):
-    # Look at angular speeds over time for each ID
+def plot_ang_speed(ds, speed_name: str, exp_name: str, batch_num: int, start_frame = 0, end_frame = -1):
+    # Look at angular speeds over time for a few IDs
 
-    _, axs = plt.subplots(2, 1, figsize=(26, 12), sharey = True)
-    column_names = ['vtheta_high_ord', 'vtheta_sg']
+    # Get frame slice
+    frames = get_frame_slice(ds, start_frame, end_frame)
 
-    for id in range(2):
+    _, axs = plt.subplots(2, 1, figsize=(26, 12), sharex = True)
+    column_names = [f'theta_{speed_name}', f'vtheta_{speed_name}']
+
+    # Initialize max, min for periodic lines
+    min_n = 0
+    max_n = 0
+
+    for id in range(5):
         for i in range(len(column_names)):
-            fitted_speed = ds[f'{column_names[i]}'].isel(id=id, frame = t_slice)
-            axs[i].plot(fitted_speed['frame'], fitted_speed, label=f'ID {id}')
+            fitted_speed = ds[f'{column_names[i]}'].sel(id=id, frame = frames)
+            copy = fitted_speed.copy()
+            if not i:
+                copy[~np.isnan(fitted_speed)] = np.unwrap(fitted_speed[~np.isnan(fitted_speed)]) # Unwrap to make it continuous
+                min_n = min(np.nanmin(copy), min_n)
+                max_n = max(np.nanmax(copy), max_n)
+            axs[i].plot(fitted_speed['frame'], copy, label=f'ID {id}')
+
+    # Round min and max to nearest multiple of 2π
+    min_n = -1*np.ceil(abs(min_n) / (2 * np.pi))
+    max_n = np.ceil(max_n / (2 * np.pi))
+
+    for n in range(int(min_n), int(max_n)):
+        axs[0].axhline(n * 2 * np.pi, color='black', linestyle='--', linewidth=0.5)
 
     for i in range(len(column_names)):
         axs[i].set_xlabel('Frame')
-        axs[i].set_ylabel(f'{column_names[i].capitalize()}')
+        axs[i].set_ylabel(f'{column_names[i]}')
         if len(ds['id'].values) < 10:
             axs[i].legend()
     plt.tight_layout()
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/angular_speed_over_time.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/ang_speed_over_time_{speed_name}.png')
 
 def plot_num_tracklets_over_time(ds, exp_name: str, batch_num: int):
     # Look at number of tracklets in any given instance to see how many individuals are missing. This assumes all are tracked at one point.
@@ -540,4 +572,4 @@ def plot_num_tracklets_over_time(ds, exp_name: str, batch_num: int):
     plt.xlabel('Frame')
     plt.ylabel('Individuals tracked (%)') # Assumes TReX at one point tracked all individuals
     plt.title('Tracked Individuals Over Time')
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/num_tracklets_over_time.png')
+    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/num_tracklets_over_time.png')
