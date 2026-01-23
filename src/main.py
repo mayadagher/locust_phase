@@ -7,6 +7,7 @@ from compute_activity import *
 from visualize_activity import *
 from compute_neighbours import *
 from check_frequencies import *
+from visualize_time import *
 
 '''_____________________________________________________PARAMETERS____________________________________________________________'''
 # Loading parameters
@@ -24,6 +25,8 @@ threshes = [0.3352, 0.3243] # High order diff speed
 speed_dict = {'raw': None, 'high_ord':{'dt': 1, 'num_iterations': 1, 'order': 4}, 'butter': {'dt': 1, 'filter_order': 2, 'cutoff_freq': 0.3}, 'spline': {'degree': 3, 's': 1}}
 interp_dict= {'max_gap': 1, 'max_dist': 0.5}
 fill_gaps = False
+
+params = {'speed_dict': speed_dict, 'interp_dict': interp_dict, 'fill_gaps': fill_gaps}
 
 # Visualizing and animating parameters
 vid_path = './tracking/trex_inputs/20230329.mp4'
@@ -43,25 +46,25 @@ suffix = ''
 
 if __name__ == "__main__":
 
-    # LOAD RAW DATA
+    # # LOAD RAW DATA
     # print('Make sure batch number is not excluded in dockerignore.')
     # num_ids, ds_raw = load_trex_data(batch_num, exp_name, num_ids) # Last integer specifies how many IDs to include
     # print('TRex data loaded. Number of IDs:', num_ids)
 
-    # PREPROCESS DATA
+    # # PREPROCESS DATA
     # ds = preprocess_data(ds_raw, speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=True, radius=960) # Center only to exclude stray detections near borders
     # print('Data pre-processed.')
 
-    # SAVE PREPROCESSED DATA
-    # ds_save_name = f'./preprocessed/{exp_name}/batch_{batch_num}/traj_data' + suffix
+    # # SAVE PREPROCESSED DATA
+    # ds_save_name = f'/output/preprocessed/{exp_name}/batch_{batch_num}/traj_data' + suffix
     # save_ds(ds, ds_save_name)
     # print('Data saved.')
 
     # LOAD PREPROCESSED DATA
-    ds_load_name = f'./preprocessed/{exp_name}/batch_{batch_num}/traj_data' + '.h5'
-    ds = load_preprocessed_data(ds_load_name)
-    print('Pre-processed data loaded.')
-    print(ds.data_vars)
+    # ds_load_name = f'/output/preprocessed/{exp_name}/batch_{batch_num}/traj_data' + '.h5'
+    # ds = load_preprocessed_data(ds_load_name)
+    # print('Pre-processed data loaded.')
+    # print(ds.data_vars)
     # print(ds.isel(id=0, frame=slice(0, 300))['x_raw'])
     # print(ds.isel(id=0, frame=slice(0, 300))['x_butter'])
 
@@ -95,8 +98,8 @@ if __name__ == "__main__":
     # print('Plotted orientations and angular speed over time.')
 
     # PLOT NUMBER OF TRACKLETS OVER TIME
-    plot_num_tracklets_over_time(ds, exp_name = exp_name, batch_num = batch_num)
-    print('Plotted number of tracklets over time.')
+    # plot_num_tracklets_over_time(ds, exp_name = exp_name, batch_num = batch_num)
+    # print('Plotted number of tracklets over time.')
 
     # ANIMATE TRACKLET LENGTHS
     # animate_trajs_coloured(ds, vid_path, exp_name = exp_name, batch_num = batch_num, colours=ds['tracklet_length'], cbar_name='Tracklet length', start_frame=0, end_frame=-1, interval=50)
@@ -114,7 +117,7 @@ if __name__ == "__main__":
     # print('PSDs computed.')
 
     # LOAD PSD FILE
-    # psd_load_name = f'./preprocessed/{exp_name}/batch_{batch_num}/psd' + '.h5'
+    # psd_load_name = f'/output/preprocessed/{exp_name}/batch_{batch_num}/psd' + '.h5'
     # psds = load_psds_hdf5(psd_load_name)
     # print('PSD data loaded.')
 
@@ -136,8 +139,20 @@ if __name__ == "__main__":
     # plot_activity_autocorr_psd(powers, freq, [quant_low, quant_high], speed_name = speed_name, exp_name=exp_name, batch_num=batch_num)
 
     # ANIMATE NEIGHBOURS
-    # nbrs = load_neighbours_hdf5(f'./preprocessed/{exp_name}/batch_{batch_num}/nbrs.h5')
+    # nbrs = load_neighbours_hdf5(f'/output/preprocessed/{exp_name}/batch_{batch_num}/nbrs.h5')
     # # print(nbrs)
     # animate_neighbours(ds, nbrs, interaction = 'topo', inter_param = 5, fid = 1, end_frame = 300, video_path = vid_path, speed_name = 'spline', exp_name = exp_name, batch_num = batch_num, buffer = 80)
 
+    
+    # MULTI-BATCH ANALYSIS
+
+    # PREPROCESS ALL BATCHES
+    # preprocess_save_all_batches(exp_name, num_batches=11, speed_dict=speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=True, radius=960, reprocess=False)
+        
+    # COUNT DETECTIONS OVER TIME ACROSS ALL FRAMES
+    path_h5 = '/detections/10K_full_2.hdf5'
+    num_detections = detections_over_time(path_h5)
+
+    # COUNT TRACKLETS OVER TIME ACROSS ALL BATCHES
+    tracklets_over_time(speed_name='raw', num_batches=11, exp_name=exp_name, num_detections=num_detections)
     pass

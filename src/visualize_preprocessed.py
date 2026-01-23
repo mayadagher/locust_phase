@@ -10,7 +10,6 @@ import seaborn as sns
 from scipy.optimize import curve_fit
 import scipy.stats as st
 
-from clean_tracks import preprocess_data
 from helper_fns import *
 
 '''_____________________________________________________ANIMATION FUNCTIONS____________________________________________________________'''
@@ -469,60 +468,60 @@ def plot_single_tracklet_lengths(ds, speed_name: str, exp_name: str, batch_num: 
     plt.ylabel('Frequency')
     plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/tracklet_lengths_{speed_name}.png')
 
-def plot_tracklet_lengths_hist(ds_raw, speed_dict: dict, interp_dict: dict, radius: float, exp_name: str, batch_num: int, n_bins = 15):
+# def plot_tracklet_lengths_hist(ds_raw, speed_dict: dict, interp_dict: dict, radius: float, exp_name: str, batch_num: int, n_bins = 15):
 
-    # Initiate plot
-    _, ax = plt.subplots(2, 2, sharex = True, sharey = True, figsize = (8, 5))
-    labels = [f'None', f'{round(radius)}']
+#     # Initiate plot
+#     _, ax = plt.subplots(2, 2, sharex = True, sharey = True, figsize = (8, 5))
+#     labels = [f'None', f'{round(radius)}']
 
-    # Iterate over no interpolation, with interpolation
-    for i in range(2):
-        lengths_list = []
-        # Iterate over all data, centered
-        for j in range(2):
-            print(2*i + j + 1)
-            ds = preprocess_data(ds_raw, speed_dict, fill_gaps = bool(i), interp_dict = interp_dict, center_only = bool(j), radius = radius)
+#     # Iterate over no interpolation, with interpolation
+#     for i in range(2):
+#         lengths_list = []
+#         # Iterate over all data, centered
+#         for j in range(2):
+#             print(2*i + j + 1)
+#             ds = preprocess_data(ds_raw, speed_dict, fill_gaps = bool(i), interp_dict = interp_dict, center_only = bool(j), radius = radius)
 
-            # Broadcast id coordinate to the same shape as tracklet_id
-            ids = xr.broadcast(ds['id'], ds['tracklet_id'])[0].values.ravel()  # shape (id, frame)
+#             # Broadcast id coordinate to the same shape as tracklet_id
+#             ids = xr.broadcast(ds['id'], ds['tracklet_id'])[0].values.ravel()  # shape (id, frame)
 
-            # Compute tracklet lengths
-            tids = ds['tracklet_id'].values.ravel()
+#             # Compute tracklet lengths
+#             tids = ds['tracklet_id'].values.ravel()
 
-            mask = ~np.isnan(tids) # Make mask of non nan tracklet ids
-            valid_ids = ids[mask].astype(int)
-            valid_tids = tids[mask].astype(int)
+#             mask = ~np.isnan(tids) # Make mask of non nan tracklet ids
+#             valid_ids = ids[mask].astype(int)
+#             valid_tids = tids[mask].astype(int)
 
-            # Count length of tracklets
-            counts = np.bincount(np.ravel_multi_index((valid_ids, valid_tids), (int(valid_ids.max()+1), int(valid_tids.max()+1))))
-            lengths_list.append(counts)
+#             # Count length of tracklets
+#             counts = np.bincount(np.ravel_multi_index((valid_ids, valid_tids), (int(valid_ids.max()+1), int(valid_tids.max()+1))))
+#             lengths_list.append(counts)
 
-        max_length = np.max([np.max(lengths) for lengths in lengths_list])
-        bins = np.logspace(0, np.log10(max_length), n_bins)
+#         max_length = np.max([np.max(lengths) for lengths in lengths_list])
+#         bins = np.logspace(0, np.log10(max_length), n_bins)
 
-        for k, lengths in enumerate(lengths_list):
-            sns.histplot(lengths, ax=ax[i,0], bins=bins, label=labels[k])
+#         for k, lengths in enumerate(lengths_list):
+#             sns.histplot(lengths, ax=ax[i,0], bins=bins, label=labels[k])
             
-        counts1, _ = np.histogram(lengths_list[0], bins = bins)
-        counts2, _ = np.histogram(lengths_list[1], bins = bins)
-        widths = np.diff(bins)
-        bar_width = np.median(widths / bins[:-1]) * bins[:-1]  # fraction of local bins
-        ax[i,1].bar(bins[:-1], counts1 - counts2, color = 'gray', width = bar_width, align = 'edge')
+#         counts1, _ = np.histogram(lengths_list[0], bins = bins)
+#         counts2, _ = np.histogram(lengths_list[1], bins = bins)
+#         widths = np.diff(bins)
+#         bar_width = np.median(widths / bins[:-1]) * bins[:-1]  # fraction of local bins
+#         ax[i,1].bar(bins[:-1], counts1 - counts2, color = 'gray', width = bar_width, align = 'edge')
 
-        ax[i,0].set_ylabel('Count', fontsize = 15)
-        ax[i,1].set_ylabel('Excluded', fontsize = 15)
+#         ax[i,0].set_ylabel('Count', fontsize = 15)
+#         ax[i,1].set_ylabel('Excluded', fontsize = 15)
 
-        for k in range(2):
-            ax[i,k].set_title('Interpolated' if i == 1 else 'Not interpolated', fontsize = 15)
-            if i:
-                ax[i,k].set_xlabel('Tracklet length (frames)', fontsize = 13)
-            if not k:
-                ax[i,k].legend(title = 'Radius')
+#         for k in range(2):
+#             ax[i,k].set_title('Interpolated' if i == 1 else 'Not interpolated', fontsize = 15)
+#             if i:
+#                 ax[i,k].set_xlabel('Tracklet length (frames)', fontsize = 13)
+#             if not k:
+#                 ax[i,k].legend(title = 'Radius')
 
-    plt.xscale('log')
-    plt.yscale('log')
-    plt.tight_layout()
-    plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/tracklet_length_hists/rad_{str(int(radius))}.png')
+#     plt.xscale('log')
+#     plt.yscale('log')
+#     plt.tight_layout()
+#     plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/tracklet_length_hists/rad_{str(int(radius))}.png')
 
 def plot_ang_speed(ds, speed_name: str, exp_name: str, batch_num: int, start_frame = 0, end_frame = -1):
     # Look at angular speeds over time for a few IDs

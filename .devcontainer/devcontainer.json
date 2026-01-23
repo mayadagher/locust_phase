@@ -4,6 +4,11 @@
     "dockerfile": "../Dockerfile",
     "context": ".."
   },
+  "mounts": [
+    "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/trex_outputs/,target=/data,type=bind,readonly",
+    "source=/Users/mayadagher/Documents/Locusts/hangar/outputs/,target=/output,type=bind",
+    "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/h5s/,target=/detections,type=bind,readonly"
+  ],
   "settings": {
     "terminal.integrated.shell.linux": "/bin/bash"
   },

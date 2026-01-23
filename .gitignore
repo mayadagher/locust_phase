@@ -3,17 +3,9 @@
 __pycache__/
 *.pyc
 
-# Ignore entire tracking folder except for bash scripts
-tracking/csvs/
-tracking/h5s/
-tracking/trex_inputs/
-tracking/trex_outputs/
 
 # Ignore images
 *.png
 
 # Ignore plots
 plots/
-
-# Ignore preprocessed data
-preprocessed/

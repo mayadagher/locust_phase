@@ -7,6 +7,9 @@ from scipy.signal import savgol_filter
 import scipy.signal
 import scipy
 import time
+import os
+
+from data_handling import load_trex_data, save_ds
 
 '''_____________________________________________________COMPUTATION FUNCTIONS____________________________________________________________'''
 
@@ -42,8 +45,7 @@ def interpolate_small_gaps(x, y, missing, max_gap=1, max_dist=0.5):
         dist_gap = np.sqrt(dx**2 + dy**2)
 
         if gap_size <= max_gap and dist_gap <= max_dist:
-            if e < 300:
-                print(f'start: {s}', gap_size, dist_gap)
+
             # Linear interpolate across this small gap
             x[s:e] = np.linspace(x[s-1], x[e], gap_size + 2)[1:-1]
             y[s:e] = np.linspace(y[s-1], y[e], gap_size + 2)[1:-1]
@@ -76,7 +78,7 @@ def butter_zero_phase(x, dt=1, filter_order=2, cutoff_freq=0.5):
     return x_hat
 
 def spline_scipy(x, degree=3, s=1):
-    '''x is strictly contiguous, so t is a constant.'''
+    '''x is strictly contiguous.'''
 
     t = np.arange(len(x))
 
@@ -302,7 +304,7 @@ def compute_dist_from_center(ds, center=(1920/2, 1920/2)):
     ds_copy['dist_from_center'] = np.hypot(ds_copy['y_high_ord'] - center[1], ds_copy['x_high_ord'] - center[0])
     return ds_copy
 
-def preprocess_data(ds, speed_dict, fill_gaps = False, interp_dict = None, center_only = False, radius = None):
+def preprocess_raw(ds, speed_dict, fill_gaps = False, interp_dict = None, center_only = False, radius = None):
     ''' Interpolates and computes speed, excludes borders, computes tracklet lengths, and gives tracklets identities. Arguably, repeatedly computing speed/interpolating is wasteful if we want to compare
     effects of excluding borders on tracklet lengths, but I can easily split this function later if needed.
     '''
@@ -349,5 +351,40 @@ def preprocess_data(ds, speed_dict, fill_gaps = False, interp_dict = None, cente
     print('Time to compute distance from center:', round(t7 - t6, 3))
     return ds
 
-# More piecing together? Across identities? Comp. expensive, maybe covered by just training a better model.
+def load_and_preprocess(batch_num:int, exp_name:str, speed_dict:dict, fill_gaps:bool, interp_dict:dict, center_only:bool, radius:int, load_num_ids:int = None):
+    ''' Load raw data for a batch number and preprocess it.'''
+    num_ids, ds_raw = load_trex_data(batch_num, exp_name, load_num_ids)
+    print('TRex data loaded. Number of IDs:', num_ids)
+
+    ds = preprocess_raw(ds_raw, speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=center_only, radius=radius)
+    print('Data pre-processed.')
+
+    return ds, num_ids
+
+def preprocess_save_all_batches(exp_name:str, num_batches:int, speed_dict:dict, fill_gaps:bool, interp_dict:dict, center_only:bool, radius:int, reprocess:bool = False):
+    ''' Preprocess all batches and save them.'''
+
+    for batch_i in range(num_batches):
+        # Define folder path
+        folder_path = f'/output/preprocessed/{exp_name}/batch_{batch_i}'
+        
+        # Check if folder exists, create if not
+        os.makedirs(folder_path, exist_ok=True)
+
+        # Check if preprocessed data file exists
+        data_file_path = f'{folder_path}/traj_data.h5'
+        exists = os.path.exists(data_file_path)
+
+        if not exists or reprocess:
+            print(f'Preprocessing data for batch {batch_i}.')
+
+            ds, _ = load_and_preprocess(batch_i, exp_name, speed_dict, fill_gaps, interp_dict, center_only, radius)
+
+            # SAVE DATA
+            params = {'speed_dict': speed_dict, 'fill_gaps': fill_gaps, 'interp_dict': interp_dict, 'center_only': center_only, 'radius': radius}
+            save_ds(ds, data_file_path, params)
+            print(f'Data for batch {batch_i} saved.\n')
+
+            del ds
+
 # Try to isolate discontinuities by looking at angular speed (to make sure tracklets are actually just one individual)
