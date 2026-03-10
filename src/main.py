@@ -1,5 +1,8 @@
 '''_____________________________________________________IMPORTS____________________________________________________________'''
 
+import h5py
+# from ultralytics import YOLO
+
 from data_handling import *
 from clean_tracks import *
 from visualize_preprocessed import *
@@ -8,8 +11,20 @@ from visualize_activity import *
 from compute_neighbours import *
 from check_frequencies import *
 from visualize_time import *
+from image_analysis import *
+from keypoints import *
+from self_track import *
 
 '''_____________________________________________________PARAMETERS____________________________________________________________'''
+
+# Training parameters
+workspace = "locustorientations"
+project_name = "locusts_2kp"
+data_version = 8
+yolo_short_name = "yolo26"
+yolo_version = 'yolo26n-pose.pt'
+img_sz = 640
+
 # Loading parameters
 batch_num = 1
 exp_name = '20230329'
@@ -22,14 +37,15 @@ threshes = [0.3352, 0.3243] # High order diff speed
 # speed_dict = {'raw': None, 'moving_avg': {'window_length': 5, 'center': True}, 'moving_med': {'window_length': 5, 'center': True}, 'sg': {'window_length': 5, 'polyorder': 2, 'deriv': 0, 'delta': 1.0}}
 # speed_dict = {'raw': None, 'high_ord':{'dt': 1, 'num_iterations': 1, 'order': 4}, 'moving_avg': {'window_length': 3, 'center': True}, 'moving_med': {'window_length': 3, 'center': True}, 
             #   'sg': {'window_length': 3, 'polyorder': 2, 'deriv': 0, 'delta': 1.0}, 'butter': {'dt': 1, 'filter_order': 2, 'cutoff_freq': 0.5}}
-speed_dict = {'raw': None, 'high_ord':{'dt': 1, 'num_iterations': 1, 'order': 4}, 'butter': {'dt': 1, 'filter_order': 2, 'cutoff_freq': 0.3}, 'spline': {'degree': 3, 's': 1}}
+speed_dict = {'raw': None, 'high_ord':{'dt': 1, 'num_iterations': 1, 'order': 4}, 'butter': {'dt': 1, 'filter_order': 2, 'cutoff_freq': 0.3}, 'spline': {'degree': 2, 's': 0.5}}
 interp_dict= {'max_gap': 1, 'max_dist': 0.5}
 fill_gaps = False
 
 params = {'speed_dict': speed_dict, 'interp_dict': interp_dict, 'fill_gaps': fill_gaps}
 
 # Visualizing and animating parameters
-vid_path = './tracking/trex_inputs/20230329.mp4'
+vid_path = '/videos/20230329.mp4'
+img_dir = '/original/20230329/video/'
 
 # Neighbour computation parameters
 # inter_dict = {'metric': [15, 20, 25, 30], 'topo': [1, 3, 7], 'voronoi': [None]}
@@ -46,13 +62,42 @@ suffix = ''
 
 if __name__ == "__main__":
 
+    # GENERATE TILES FOR TRAINING KEYPOINTS FROM VIDEO
+    # extract_random_tiles(image_dir=img_dir, output_dir="/keypoints/unlabeled_tiles", n_tiles=50, tile_size=320)
+
+    # TRAIN MODEL
+    # train_model(workspace, project_name, data_version, yolo_short_name, yolo_version, epochs = 1, img_sz = img_sz)
+
+    # EVALUATE MODEL AND VISUALIZE KEYPOINTS
+    # visualize_results(weights_path='/keypoints/best_kp_weights.pt', img_idx=4, img_dir='./locusts_2kp-8/')
+
+    # TEST ONE IMAGE
+    # with h5py.File('/keypoints/temp_test.hdf5','w') as f_out:
+    #     model = YOLO('/keypoints/best_kp_weights.pt')
+    #     slice_img(model, img_path='/original/20230329/video/65MP01_10Kmarching_01_2023-03-29_10-10-24-124.jpg', h5_out=f_out, frame_num=0, overlap = 0.3)
+
+    # VISUALIZE WHOLE FRAME
+    # visualize_frame_results(h5_file='/keypoints/temp_test.hdf5', img_path='/original/20230329/video/65MP01_10Kmarching_01_2023-03-29_10-10-24-124.jpg', frame_num=0)
+
+    # GET KEYPOINTS FOR WHOLE VIDEO
+    # slice_folder_to_h5(path_to_model = '/keypoints/best_kp_weights.pt', frames_dir = img_dir, video_name = '20230329', start_idx = 1792, stop_idx = 2200, chunk_size = 500, tile_size = 640, img_size = 7000, overlap = 0.3)
+
+    # PREPROCESS KEYPOINTS TO GET RID OF DUPLICATES ACROSS TILES
+    # preprocess_kps(h5_in='/keypoints/20230329_unprocessed_kps.hdf5', frames_dir = img_dir)
+
+    # TRACK WITH MAYOLO
+    track_kps(detections_h5_path='/keypoints/20230329_processed_kps.hdf5', output_dir='/keypoints/20230329_tracked_kps', start_frame=0, end_frame=8, max_frames_lost=3)
+
+    # CREATE CSV FILE FOR TREX TRACKING
+    # detections_h5_to_trex_csv('/keypoints/20230329_processed_kps.hdf5', '/keypoints/20230329_trex_input.csv', end_frame = 3)
+
     # # LOAD RAW DATA
     # print('Make sure batch number is not excluded in dockerignore.')
-    # num_ids, ds_raw = load_trex_data(batch_num, exp_name, num_ids) # Last integer specifies how many IDs to include
+    # num_ids, ds_raw = load_trex_data(batch_num, exp_name, 1000) # Last integer specifies how many IDs to include
     # print('TRex data loaded. Number of IDs:', num_ids)
 
     # # PREPROCESS DATA
-    # ds = preprocess_data(ds_raw, speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=True, radius=960) # Center only to exclude stray detections near borders
+    # ds = preprocess_raw(ds_raw, speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=True, radius=960) # Center only to exclude stray detections near borders
     # print('Data pre-processed.')
 
     # # SAVE PREPROCESSED DATA
@@ -68,6 +113,24 @@ if __name__ == "__main__":
     # print(ds.isel(id=0, frame=slice(0, 300))['x_raw'])
     # print(ds.isel(id=0, frame=slice(0, 300))['x_butter'])
 
+    # COMPUTE MEDIAN PER-LOCUST AREA FROM LOW DENSITY LOCUSTS
+    # val_threshold = 20
+    # # Modify positions to account for different resolutions
+    # factor = 7000/1920
+    # ds['x_high_ord'] = ds['x_high_ord'] * factor
+    # ds['y_high_ord'] = ds['y_high_ord'] * factor
+    # med_locust_area = compute_single_locust_area(image_dir=img_dir, ds=ds, pos_name='high_ord', num_individuals=1000, density_radius=70, val_threshold=val_threshold, exp_name=exp_name, batch_num=batch_num)
+    # # print('Median locust area from low density locusts:', med_locust_area)
+
+    # ESTIMATE NUMBER OF LOCUSTS PER FRAME
+    # med_locust_area = 1289.5
+    # num_locusts = estimate_locust_number(image_dir=img_dir, per_locust_area=med_locust_area, val_threshold=val_threshold, area_threshold=0.7*med_locust_area, radius_inclusion=3500, start_frame = 0, end_frame=1000)
+    # # print('Estimated number of locusts per frame:', num_locusts)
+    # plt.plot(num_locusts)
+    # plt.xlabel('Frame number', fontsize = 17)
+    # plt.ylabel('Estimated number of locusts', fontsize = 17)
+    # plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/estimated_num_locusts.png')
+
     # PLOT TRACKS
     # plot_tracks(ds, ids = [0, 1], end_frame = 300, exp_name = exp_name, batch_num = batch_num)
 
@@ -79,6 +142,7 @@ if __name__ == "__main__":
     # print('Plotted speed histograms.')
 
     # PLOT SMOOTHED COORDINATES
+
     # plot_smoothed_coords(ds, id = 0, speed_names = ['high_ord', 'butter', 'spline'], t_slice = slice(0, 300), exp_name = exp_name, batch_num = batch_num)
     # print('Plotted smoothed coordinates.')
 
@@ -94,7 +158,7 @@ if __name__ == "__main__":
     # print('Plotted tracklet length histograms.')
 
     # PLOT ORIENTATIONS AND ANGULAR SPEED OVER TIME
-    # plot_ang_speed(ds, t_slice = slice(0, 500), exp_name = exp_name, batch_num = batch_num)
+    # plot_ang_speed(ds, speed_name = 'spline', exp_name = exp_name, batch_num = batch_num, end_frame = 300)
     # print('Plotted orientations and angular speed over time.')
 
     # PLOT NUMBER OF TRACKLETS OVER TIME
@@ -102,8 +166,11 @@ if __name__ == "__main__":
     # print('Plotted number of tracklets over time.')
 
     # ANIMATE TRACKLET LENGTHS
-    # animate_trajs_coloured(ds, vid_path, exp_name = exp_name, batch_num = batch_num, colours=ds['tracklet_length'], cbar_name='Tracklet length', start_frame=0, end_frame=-1, interval=50)
+    # animate_trajs_coloured(ds, vid_path, exp_name = exp_name, batch_num = batch_num, colours=ds['tracklet_length'], cbar_name='Tracklet length', start_frame=3500, end_frame=4000, interval=50)
     # print('Animated tracklet lengths.')
+
+    # ANIMATE EGOCENTRIC VIEW OF A FOCAL INDIVIDUAL
+    # animate_focal_ego(ds, fid=5, video_path=vid_path, smooth_name='spline', exp_name=exp_name, batch_num=batch_num, buffer=50, start_frame=0, end_frame=500, interval=80)
 
     # COMPUTE NEIGHBOURS
     # create_nbrs_h5(ds, inter_dict, exp_name, batch_num, do_regions = False)
@@ -143,16 +210,17 @@ if __name__ == "__main__":
     # # print(nbrs)
     # animate_neighbours(ds, nbrs, interaction = 'topo', inter_param = 5, fid = 1, end_frame = 300, video_path = vid_path, speed_name = 'spline', exp_name = exp_name, batch_num = batch_num, buffer = 80)
 
-    
+    # corr_tracklet_length_density(ds, nbrs, exp_name=exp_name, batch_num=batch_num, radius = 20)
+    # corr_tracklet_length_centrality(ds, exp_name=exp_name, batch_num=batch_num)
+
     # MULTI-BATCH ANALYSIS
 
     # PREPROCESS ALL BATCHES
     # preprocess_save_all_batches(exp_name, num_batches=11, speed_dict=speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=True, radius=960, reprocess=False)
         
     # COUNT DETECTIONS OVER TIME ACROSS ALL FRAMES
-    path_h5 = '/detections/10K_full_2.hdf5'
-    num_detections = detections_over_time(path_h5)
+    # bb_detections, kp_detections = bb_vs_kp_detections_over_time(bb_h5 = '/bb/h5s/10K_full_2.hdf5', kp_preprocessed_h5 = '/keypoints/20230329_processed_kps.hdf5', plot = True)
 
     # COUNT TRACKLETS OVER TIME ACROSS ALL BATCHES
-    tracklets_over_time(speed_name='raw', num_batches=11, exp_name=exp_name, num_detections=num_detections)
+    # tracklets_over_time(speed_name='raw', num_batches=11, exp_name=exp_name, num_detections=num_detections)
     pass

@@ -3,25 +3,21 @@
 
 import numpy as np
 import xarray as xr
+from scipy.spatial import cKDTree
 
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
 
-def get_frame_slice(ds: xr.Dataset, start = 0, end = -1):
-    '''Return slice of frames. Helpful for batches that aren't 0.'''
+def get_frame_slice(ds: xr.Dataset, start:int = 0, end:int | None = None):
+    '''Return slice of frames from relative frame numbers (0, 1, 2, ...) in absolute frame numbers.'''
 
-    first_frame = int(ds.frame.min())
-    last_frame = int(ds.frame.max())
-    num_frames = last_frame - first_frame + 1
+    first_global, last_global = int(ds.frame.min()), int(ds.frame.max())
+    start = max(first_global, start)
 
-    if end < 0:
-        end = num_frames
+    global_frames = range(start, end or (last_global + 1))
 
-    # Check appropriate start and end frame inputs
-    assert start < num_frames, f"Start frame is too large for the number of frames for this batch, which is {num_frames}."
-    assert end <= num_frames, f"End frame is too large for the number of frames for this batch, which is {num_frames}."
-    assert start < end, f"Start frame must be less than end frame."
+    assert len(global_frames), f"Start frame must be less than end frame. Got start={start}, end={end or (last_global + 1)}."
 
-    return np.arange(first_frame + start, first_frame + end)
+    return global_frames
 
 def run_lengths(arr, val = None):
     """
@@ -183,3 +179,33 @@ def within_tracklet_pos(arr: np.ndarray) -> np.ndarray:
             out[i, s:e] = np.arange(-length + 1, 1)
 
     return out
+
+def get_metric_density(ds: xr.Dataset, pos_name: str, radius: float) -> xr.Dataset:
+    """
+    Compute local density (number of neighbours within radius) per id per frame.
+    """
+
+    x = ds[f"x_{pos_name}"].values
+    y = ds[f"y_{pos_name}"].values
+    density = np.full(x.shape, np.nan, dtype=float)
+
+    for f in range(x.shape[1]):
+        xf = x[:, f]
+        yf = y[:, f]
+
+        mask = ~np.isnan(xf) & ~np.isnan(yf)
+        if mask.sum() <= 1:
+            continue
+
+        pts = np.column_stack((xf[mask], yf[mask]))
+
+        tree = cKDTree(pts)
+        counts = tree.query_ball_tree(tree, r=radius)
+
+        dens = np.array([len(c) - 1 for c in counts])
+        density[mask, f] = dens
+
+    ds = ds.copy()
+    ds[f"density_r_{radius}"] = (("id", "frame"), density)
+
+    return ds

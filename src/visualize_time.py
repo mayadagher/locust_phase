@@ -10,23 +10,28 @@ from helper_fns import *
 
 '''_____________________________________________________PLOTTING FUNCTIONS____________________________________________________________'''
 
-def detections_over_time(path_h5:str, plot:bool=False):
-    num_detections = []
-    with h5py.File(path_h5, 'r') as f:
+def bb_vs_kp_detections_over_time(bb_h5:str, kp_preprocessed_h5:str, plot:bool=False):
+    bb_detections = []
+    with h5py.File(bb_h5, 'r') as f:
         for i in range(1, len(f.keys()) + 1):
             frame = f[f'coords_{i}']
-            num_detections.append(frame.shape[1])
+            bb_detections.append(frame.shape[1])
+
+    kp_detections = []
+    with h5py.File(kp_preprocessed_h5, 'r') as f:
+        for i in range(len(f.keys())):
+            num_detections = len(f[f'f{i}/head']) # Number of heads and tails always equal
+            kp_detections.append(num_detections)
     
     if plot:
-        _, ax = plt.subplots(2, 1, figsize=(20, 10))
-        ax[0].plot(num_detections)
-        ax[1].plot(100*np.array(num_detections)/np.max(num_detections))
-        ax[1].set_xlabel('Frame', fontsize=17)
-        ax[0].set_ylabel('Number of detections', fontsize=17)
-        ax[1].set_ylabel('Percent detected (%)', fontsize=17)
+        plt.plot(bb_detections, label = 'BB')
+        plt.plot(kp_detections, label = 'Keypoint')
+        plt.legend()
+        plt.xlabel('Frame', fontsize=17)
+        plt.ylabel('Number of detections', fontsize=17)
         plt.savefig('./plots/20230329/all/detections_over_time.png')
 
-    return num_detections
+    return bb_detections, kp_detections
 
 def tracklets_over_time(speed_name:str, num_batches:int, exp_name:str, num_detections:list):
     """
@@ -57,7 +62,7 @@ def tracklets_over_time(speed_name:str, num_batches:int, exp_name:str, num_detec
     _, ax = plt.subplots(2, 1, figsize=(12, 10), sharex = True)
 
     ax[0].plot(merged['frame'], merged, color = 'r', label = 'TRex tracklets')
-    ax[0].plot(np.arange(len(num_detections)), num_detections, color='b', alpha=0.5, label='Detections')
+    ax[0].plot(np.arange(len(num_detections)), num_detections, color='b', alpha=0.5, label='BB detections')
     ax[0].set_ylabel('Number of tracklets/detections', fontsize=14)
     ax[0].legend(fontsize=14)
     

@@ -8,6 +8,7 @@ import scipy.signal
 import scipy
 import time
 import os
+import pandas as pd
 
 from data_handling import load_trex_data, save_ds
 
@@ -77,12 +78,12 @@ def butter_zero_phase(x, dt=1, filter_order=2, cutoff_freq=0.5):
 
     return x_hat
 
-def spline_scipy(x, degree=3, s=1):
+def spline_scipy(x, degree=2, s=0.5):
     '''x is strictly contiguous.'''
 
     t = np.arange(len(x))
 
-    spline = scipy.interpolate.UnivariateSpline(t, x, k=degree, s=s*len(x))
+    spline = scipy.interpolate.UnivariateSpline(t, x, k=degree, s=s*len(x)) # s is made to be proportional to tracklet length
     x_hat = spline(t)
 
     return x_hat
@@ -97,6 +98,7 @@ def smooth_nantolerant(x: xr.DataArray, func, params: dict, min_tracklet_length:
     edges = np.diff(valid.astype(int))
     starts = np.where(edges == 1)[0] + 1
     ends = np.where(edges == -1)[0] + 1
+
     if valid[0]:
         starts = np.r_[0, starts]
     if valid[-1]:
@@ -237,66 +239,179 @@ def compute_tracklet_lengths_and_ids(missing_1d, fill_gaps):
 
         return lengths, segment_ids
 
-def smooth_circular(ds, smooth_func, speed_dict):
-    ''' Apply NaN-tolerant smoothing with arbitrary smoothing functions to circular data (like theta).'''
-
-    def smooth_1d(angle_1d):
-
-        # Create a mask for nans
-        mask = np.isnan(angle_1d)
-        if np.all(mask):
-            return angle_1d  # all NaNs → unchanged
-
-        # Temporarily unwrap angles to remove jumps at ±π
-        unwrapped = np.unwrap(angle_1d[~mask])
-
-        # Apply filter on valid data only
-        if smooth_func.__name__ == 'finitediff': # finitediff has two outputs
-            _, smoothed = smooth_func(unwrapped, **speed_dict)
-        else:
-            dict_copy = speed_dict.copy()
-            if smooth_func.__name__ == 'savgol_filter': # assure parameters are appropriate
-                dict_copy['window_length'] = min(dict_copy['window_length'], unwrapped.size - (1 - (unwrapped.size % 2)))
-                dict_copy['polyorder'] = min(dict_copy['polyorder'], unwrapped.size - 1)
-            smoothed = smooth_func(unwrapped, **dict_copy) # ** unpacks dictionary key-value combos
-
-        # Re-wrap to [-π, π]
-        smoothed_wrapped = (smoothed + np.pi) % (2 * np.pi) - np.pi
-
-        # Reinsert NaNs
-        result = np.full_like(angle_1d, np.nan, dtype=float)
-        result[~mask] = smoothed_wrapped
-        return result
-    
-    # Apply vectorized across all non-frame dims
-    smoothed = xr.apply_ufunc(smooth_1d, ds['theta_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, dask='allowed', output_dtypes=[float])
-
-    return smoothed
-
-def compute_theta(ds, speed_dict): # Speeds should be pre-computed
-    ''' Compute heading direction and instantaneous change in heading direction.'''
+def compute_theta(ds, speed_dict):
+    """Compute heading direction and angular velocity."""
     speed_types = list(speed_dict.keys())
 
-    def circular_deriv(thetas):
+    def rolling_median_1d(x, window):
+        return (pd.Series(x).rolling(window=window, center=True, min_periods=1).median().to_numpy())
 
-        new_thetas = thetas.copy()
-        nans = np.isnan(thetas)
-        valid_unwrapped = np.unwrap(thetas[~nans]) # Unwrap to remove jumps at ±π
-        new_thetas[~nans] = valid_unwrapped 
-        v = np.diff(new_thetas) # Differentiate
+    def smooth_theta_segment(seg, window):
+        """Unwrap → smooth → return unwrapped (segment-wise)."""
+        seg_unwrapped = np.unwrap(seg)
+        return rolling_median_1d(seg_unwrapped, window=window)
 
-        # Prepend NaN so the returned derivative has the same length as the input
-        return np.concatenate(([np.nan], v))
+    def circular_deriv(theta):
+        """NaN-safe angular derivative."""
+        theta = np.asarray(theta, dtype=float)
+        out = np.full_like(theta, np.nan)
 
-    # Compute (smoothed) orientations
+        valid = ~np.isnan(theta)
+        if valid.sum() < 2:
+            return out
+
+        theta_unwrapped = np.unwrap(theta[valid])
+        dtheta = np.diff(theta_unwrapped)
+
+        out[np.where(valid)[0][1:]] = dtheta
+        return out
+
     for speed in speed_types:
-        # arctan2 of diffs produces an array of length (frames - 1); reindex to the full frame index to restore original length
-        theta = np.arctan2(ds[f'y_{speed}'].diff(dim='frame'), ds[f'x_{speed}'].diff(dim='frame'))
-        theta = theta.reindex({"frame": ds['frame']})
-        ds[f'theta_{speed}'] = theta
-        ds[f'vtheta_{speed}'] = xr.apply_ufunc(circular_deriv, ds[f'theta_{speed}'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, dask='allowed', output_dtypes=[float])
-    
+        # Raw heading (wrapped)
+        theta = np.arctan2(
+            ds[f'y_{speed}'].diff("frame"),
+            ds[f'x_{speed}'].diff("frame"),
+        ).reindex({"frame": ds.frame})
+
+        # Smooth theta (segment-wise unwrap handled internally)
+        theta_smooth = xr.apply_ufunc(
+            smooth_nantolerant,
+            theta,
+            input_core_dims=[["frame"]],
+            output_core_dims=[["frame"]],
+            vectorize=True,
+            dask="allowed",
+            output_dtypes=[float],
+            kwargs={
+                "func": smooth_theta_segment,
+                "params": {"window": 15},
+                "min_tracklet_length": 1,
+            },
+        )
+
+        # Wrap back to [-pi, pi)
+        ds[f"theta_{speed}"] = (theta_smooth + np.pi) % (2 * np.pi) - np.pi
+
+        # Angular velocity
+        ds[f"vtheta_{speed}"] = xr.apply_ufunc(
+            circular_deriv,
+            ds[f"theta_{speed}"],
+            input_core_dims=[["frame"]],
+            output_core_dims=[["frame"]],
+            vectorize=True,
+            dask="allowed",
+            output_dtypes=[float],
+        )
+
     return ds
+
+def compute_theta(ds, spline_dict):
+    """Compute heading direction and angular velocity."""
+
+    def wrap(seg):
+        """Wrap angles to [-pi, pi)."""
+        return (seg + np.pi) % (2 * np.pi) - np.pi
+
+    def smooth_theta_segment(seg, degree:int, s:float):
+        """Unwrap → smooth → return unwrapped (segment-wise)."""
+        seg_unwrapped = np.unwrap(seg)
+        seg_smoothed = spline_scipy(seg_unwrapped, degree=degree, s=s)
+        return seg_smoothed
+
+    # Raw heading (wrapped)
+    theta = np.arctan2(ds[f'y'].diff("frame"), ds[f'x'].diff("frame")).reindex({"frame": ds.frame})
+
+    # Smooth theta (segment-wise unwrap handled internally)
+    theta_unwrapped_smooth = xr.apply_ufunc(smooth_nantolerant, theta, input_core_dims=[["frame"]], output_core_dims=[["frame"]], vectorize=True, dask="allowed", output_dtypes=[float], kwargs={"func": smooth_theta_segment,
+                             "params": spline_dict, "min_tracklet_length": 1})
+
+    # Angular velocity
+    ds[f"vtheta_spline"] = xr.apply_ufunc(np.diff, theta_unwrapped_smooth, input_core_dims=[["frame"]], output_core_dims=[["frame"]], vectorize=True, dask="allowed", output_dtypes=[float], kwargs={"prepend": np.nan})
+
+    # Wrap back to [-pi, pi)
+    ds[f"theta_spline"] = wrap(theta_unwrapped_smooth)
+
+    return ds
+
+# def compute_theta(ds, speed_dict):
+#     """Compute heading direction and angular velocity."""
+#     speed_types = list(speed_dict.keys())
+
+#     def hold_theta_below_speed(theta:xr.DataArray, speed:xr.DataArray, vmin:float):
+#         """
+#         Hold last valid orientation when speed drops below threshold.
+
+#         Parameters
+#         ----------
+#         theta : array-like
+#             Orientation in radians (may contain NaNs).
+#         speed : array-like
+#             Speed (same length as theta).
+#         vmin : float
+#             Speed threshold.
+
+#         Returns
+#         -------
+#         np.ndarray
+#             Orientation with zero-order hold applied.
+#         """
+#         theta = np.asarray(theta, dtype=float)
+#         speed = np.asarray(speed, dtype=float)
+
+#         out = np.full_like(theta, np.nan)
+
+#         last_theta = np.nan
+#         for i in range(len(theta)):
+#             if not np.isnan(theta[i]) and speed[i] >= vmin:
+#                 last_theta = theta[i]
+#                 out[i] = theta[i]
+#             elif speed[i] < vmin and not np.isnan(last_theta):
+#                 out[i] = last_theta
+#             else:
+#                 out[i] = np.nan
+
+#         return out
+
+#     def speed_weighted_avg(thetas, speeds):
+#         pass
+    
+#     def circular_deriv(theta):
+#         """NaN-safe angular derivative."""
+#         theta = np.asarray(theta, dtype=float)
+#         out = np.full_like(theta, np.nan)
+
+#         valid = ~np.isnan(theta)
+#         if valid.sum() < 2:
+#             return out
+
+#         theta_unwrapped = np.unwrap(theta[valid])
+#         dtheta = np.diff(theta_unwrapped)
+
+#         out[np.where(valid)[0][1:]] = dtheta
+#         return out
+    
+#     for speed in speed_types:
+#         # Raw heading (wrapped)
+#         theta = np.arctan2(ds[f'y_{speed}'].diff("frame"), ds[f'x_{speed}'].diff("frame")).reindex({"frame": ds.frame})
+
+#         # Hold theta for low speeds
+#         theta_fast = xr.apply_ufunc(hold_theta_below_speed, theta, ds[f'v_{speed}'], input_core_dims=[["frame"], ["frame"]], output_core_dims=[["frame"]], vectorize=True, dask="allowed", output_dtypes=[float], kwargs={"vmin": 0.05})
+
+#         # Wrap back to [-pi, pi)
+#         ds[f"theta_{speed}"] = (theta_fast + np.pi) % (2 * np.pi) - np.pi
+
+#         # Angular velocity
+#         ds[f"vtheta_{speed}"] = xr.apply_ufunc(
+#             circular_deriv,
+#             ds[f"theta_{speed}"],
+#             input_core_dims=[["frame"]],
+#             output_core_dims=[["frame"]],
+#             vectorize=True,
+#             dask="allowed",
+#             output_dtypes=[float],
+#         )
+
+#     return ds
 
 def compute_dist_from_center(ds, center=(1920/2, 1920/2)):
     ''' Compute distance from center for each individual at each frame using high_ord smoothed positions.'''

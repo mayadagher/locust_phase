@@ -5,8 +5,6 @@ import xarray as xr
 from sklearn.neighbors import BallTree
 from scipy.spatial import Voronoi
 import time
-import os
-import h5py
 
 from data_handling import *
 

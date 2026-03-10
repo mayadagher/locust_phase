@@ -18,6 +18,9 @@ pynumdiff
 cvxpy
 osqp
 scs
-# pyarrow
-awkward==2.6.4
-zarr==2.17.0
+ultralytics
+roboflow
+PyYAML
+supervision==0.24.0
+torch
+torchvision

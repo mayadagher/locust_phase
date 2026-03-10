@@ -5,15 +5,21 @@
     "context": ".."
   },
   "mounts": [
-    "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/trex_outputs/,target=/data,type=bind,readonly",
+
     "source=/Users/mayadagher/Documents/Locusts/hangar/outputs/,target=/output,type=bind",
-    "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/h5s/,target=/detections,type=bind,readonly"
+    "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/bb/,target=/bb,type=bind,readonly",
+    "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/keypoints/,target=/keypoints,type=bind",
+    "source=/Users/mayadagher/Documents/Locusts/hangar/original/,target=/original,type=bind"
   ],
-  "settings": {
-    "terminal.integrated.shell.linux": "/bin/bash"
-  },
-  "extensions": [
-    "ms-python.python",
-    "ms-python.vscode-pylance"
-  ]
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.shell.linux": "/bin/bash"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  }
 }

@@ -6,9 +6,11 @@ import os
 import h5py
 import json
 from pathlib import Path
+from tqdm import tqdm
+import csv
 
 '''_____________________________________________________LOAD AND SAVE FUNCTIONS____________________________________________________________'''
-def load_trex_data(batch_num, file_name, load_num_ids=None):
+def load_trex_data(batch_num:int, file_name:str, load_num_ids:int | None = None):
     """
     Load TReX .npz data into an xarray.Dataset.
     
@@ -44,14 +46,14 @@ def load_trex_data(batch_num, file_name, load_num_ids=None):
     
     return len(ids), full_ds
 
-def load_preprocessed_data(load_name): # Load pre-processed data from h5s
+def load_preprocessed_data(load_name:str): # Load pre-processed data from h5s
     """
     Load an xarray Dataset from an HDF5 file.
     """
     ds = xr.open_dataset(load_name, engine="h5netcdf")
     return ds.load()
 
-def save_ds(ds, save_name, params): # Save pre-processed data to h5s
+def save_ds(ds:xr.Dataset, save_name:str, params:dict | None): # Save pre-processed data to h5s
 
     # Save float64 variables as float32 to save space
     for var in ds.data_vars:
@@ -63,7 +65,7 @@ def save_ds(ds, save_name, params): # Save pre-processed data to h5s
 
     # Compress and save
     encoding = {var: {'compression': 'gzip', 'compression_opts': 4} for var in ds.data_vars}
-    ds.to_netcdf(f'{save_name}', engine="h5netcdf", encoding=encoding)
+    ds.to_netcdf(save_name, engine="h5netcdf", encoding=encoding)
 
 
     params_out = Path(save_name.split('.')[0] + '_params')
@@ -89,7 +91,7 @@ def save_neighbours_hdf5(h5_path: str, interaction: str, param, values: list, of
         g.create_dataset("values", data=values, compression=compression, chunks=True)
         g.create_dataset("offsets", data=offsets, compression=compression, chunks=True)
 
-def load_neighbours_hdf5(h5_path):
+def load_neighbours_hdf5(h5_path:str):
     if os.path.exists(h5_path):
         with h5py.File(h5_path, "r") as f:
             out = {}
@@ -132,7 +134,7 @@ def save_psd_hdf5(h5_path: str, fmin: str, activity: str, coordinate: str, smoot
         g.create_dataset("freq", data=freqs, compression="gzip")
         print(means, vars, freqs)
 
-def load_psds_hdf5(h5_path):
+def load_psds_hdf5(h5_path:str):
     if os.path.exists(h5_path):
         with h5py.File(h5_path, "r") as f:
             out = {}
@@ -201,3 +203,66 @@ def load_across_batches_hdf5(h5_path: str, data_name_path:str, batch_num: int):
     else:
         print(f'File {h5_path} does not exist.')
         return None, None
+    
+def detections_h5_to_trex_csv(h5_path:str, csv_path:str, start_frame:int = 0, end_frame:int = -1, rescale = True):
+
+    if rescale:
+        csv_path = csv_path.split('.')[0] + '_rescaled.csv'
+        factor = 1920/7000
+    write_header = not os.path.exists(csv_path)
+
+    with h5py.File(h5_path, 'r') as h5file, open(csv_path, 'a') as csvfile:
+        writer = csv.writer(csvfile)
+
+        if write_header:
+            writer.writerow(["x", "y", "frame"])
+
+        end_frame = min(end_frame, len(h5file.keys())) if end_frame > 0 else len(h5file.keys())
+
+        print(h5file.keys())
+
+        for f_idx in tqdm(range(start_frame, end_frame)):
+            centroids = h5file[f'f{f_idx}']['centroid']
+
+            for x, y in centroids:
+                if rescale:
+                    x, y = factor*x, factor*y
+
+                writer.writerow([x, y, f_idx])
+
+def detections_h5_to_xr_dataset(h5_path:str, start_frame:int = 0, end_frame:int | None = None, rescale_factor:float = 1):
+
+    with h5py.File(h5_path, 'r') as f:
+        end_frame = min(end_frame, len(f.keys())) if end_frame is not None else len(f.keys())
+        datasets = []
+        max_detections = 0
+        for f_idx in tqdm(range(start_frame, end_frame)):
+            centroids = f[f'f{f_idx}']['centroid']
+            heads = f[f'f{f_idx}']['head']
+            tails = f[f'f{f_idx}']['tail']
+            # conf_head_tail = f[f'f{f_idx}']['conf']
+
+            ds = xr.Dataset(
+                {
+                    'centroid_x': (['id'], centroids[:, 0]*rescale_factor), # Rescale if necessary to match original image dimensions (e.g. if detections were made on downsampled images)
+                    'centroid_y': (['id'], centroids[:, 1]*rescale_factor),
+                    'theta': (['id'], np.arctan2(heads[:, 1] - tails[:, 1], heads[:, 0] - tails[:, 0])), # Orientation calculated from head and tail positions
+
+                    # Potentially useful but not currently used variables - can be added back in if needed for tracking or other analyses
+                    # 'head_x': (['id'], heads[:, 0]),
+                    # 'head_y': (['id'], heads[:, 1]),
+                    # 'tail_x': (['id'], tails[:, 0]),
+                    # 'tail_y': (['id'], tails[:, 1]),
+                    # 'conf_head': (['id'], conf_head_tail[:, 0]),
+                    # 'conf_tail': (['id'], conf_head_tail[:, 1]),
+                },
+                coords={'frame': f_idx, 'id': np.arange(len(centroids))},
+            )
+            datasets.append(ds)
+            if len(centroids) > max_detections:
+                max_detections = len(centroids)
+
+    full_ds = xr.concat(datasets, dim='frame', join='outer')
+    
+    return full_ds
+    
