@@ -30,7 +30,7 @@ yolo_version = 'yolo26n-pose.pt'
 img_sz = 640
 
 # Keypoints path
-h5_kp='/keypoints/20230329_processed_kps.hdf5'
+h5_kp='/keypoints/20230329_processed_complete.hdf5'
 kp_local_env = '/keypoints/20230329_local_env_2.hdf5'
 
 
@@ -97,15 +97,16 @@ if __name__ == "__main__":
     # visualize_frame_results(h5_file='/keypoints/temp_test.hdf5', img_path='/original/20230329/video/65MP01_10Kmarching_01_2023-03-29_10-10-24-124.jpg', frame_num=0)
 
     # GET KEYPOINTS FOR WHOLE VIDEO
-    slice_folder_to_h5(path_to_model = '/keypoints/best_kp_weights.pt', frames_dir = img_dir, h5_in = '/keypoints/20230329_unprocessed_kps.hdf5', start_idx = 0, stop_idx = 20000, chunk_size = 200, tile_size = 640, img_size = 7000, overlap = 0.3)
+    # slice_folder_to_h5(path_to_model = '/keypoints/best_kp_weights.pt', frames_dir = img_dir, h5_in = '/keypoints/20230329_unprocessed_kps.hdf5', start_idx = 0, stop_idx = 20000, chunk_size = 200, tile_size = 640, img_size = 7000, overlap = 0.3)
    
     # PREPROCESS KEYPOINTS TO GET RID OF DUPLICATES ACROSS TILES
-    # preprocess_kps(h5_in='/keypoints/20230329_unprocessed_kps.hdf5', frames_dir = img_dir)
+    # preprocess_kps_fast(h5_in='/keypoints/20230329_unprocessed_complete.hdf5')
+    # unprocessed_stats(h5_in = '/keypoints/20230329_unprocessed_complete.hdf5', subsample = 10, n_bins = 100, output_dir = plots_path)
 
     # ANIMATE KEYPOINTS
-    # ds_kp = detections_h5_to_kp_xr(h5_kp)
+    ds_kp = detections_h5_to_kp_xr(h5_kp)
     # GET KEYPOINTS FOR WHOLE VIDEO
-    # animate_zoom_out(ds_kp, img_dir, plots_path, start_frame = 0, end_frame = 250)
+    animate_zoom_out(ds_kp, img_dir, plots_path, start_frame = 0, end_frame = 250)
 
     # COMPUTE ENTROPY
     # ds = detections_h5_to_xr_dataset(h5_kp)

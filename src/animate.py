@@ -595,5 +595,5 @@ def animate_zoom_out(ds_kp:xr.Dataset, video_path:str, output_dir:str, start_fra
     # Create Animation
     ani = FuncAnimation(fig, update, frames=frames, interval=1000/fps, blit=True)
     
-    ani.save(output_dir + 'kps_zoom_out.gif', writer='pillow', fps=fps)
+    ani.save(output_dir + 'kps_zoom_out_complete.gif', writer='pillow', fps=fps)
     plt.close()

@@ -17,6 +17,9 @@ import h5py
 import matplotlib.pyplot as plt
 
 from scipy.spatial import cKDTree
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+from joblib import Parallel, delayed
 
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
 
@@ -279,186 +282,213 @@ def visualize_frame_results(h5_file:str, img_path:str, frame_num:int):
     plt.scatter(scat[:, 1, 0], scat[:, 1, 1], c=[colours[b % len(colours)] for b in batch], s=0.1)
     plt.savefig(f"visualized_frame_{frame_num}.png")
 
-def preprocess_kps(h5_in:str, frames_dir:str):
+def unprocessed_stats(h5_in:str, subsample: int, n_bins:int, output_dir:str):
+
+    # Assure subsample value is valid (number of frames to use for statistics)
+    assert subsample > 0, f"Invalid number of frames for subsample given: {subsample}"
+    
+    # Define histograms to update over frames
+    hist_bb_confs = np.zeros(n_bins)
+    hist_head_confs = np.zeros(n_bins)
+    hist_tail_confs = np.zeros(n_bins)
+    hist_lens = np.zeros(n_bins)
+
+    # Define ranges for histograms
+    conf_range = (0, 1)
+    len_range = (0, 100)
+    
+    # Collect all relevant data from all frames for diagnostic statistics
+    with h5py.File(h5_in, 'r') as f_in:
+        
+        # Iterate over frames
+        frames = list(f_in.keys())
+        frames = [int(f[1:]) for f in frames] # Not assuming frames are contiguous in case there is some error in the inference step
+        
+        max_frames = min(len(frames), subsample)
+        frames = np.random.choice(frames, max_frames, replace = False)
+
+        for f in tqdm(frames):
+
+            # Iterate over tiles
+            for key in f_in[f'f{f}'].keys():
+
+                # Update histograms
+                hist_bb_confs += np.histogram(f_in[f'f{f}'][f'{key}/boxes/conf'], bins=n_bins, range=conf_range)[0]
+                hist_head_confs += np.histogram(f_in[f'f{f}'][f'{key}/conf'][:,0], bins=n_bins, range=conf_range)[0]
+                hist_tail_confs += np.histogram(f_in[f'f{f}'][f'{key}/conf'][:,1], bins=n_bins, range=conf_range)[0]
+                hist_lens += np.histogram(np.linalg.norm(f_in[f'f{f}'][f'{key}/xy'][:,0,:] - f_in[f'f{f}'][f'{key}/xy'][:,1,:], axis = 1), bins=n_bins, range=len_range)[0]
+
+    # Plot distribution of box confidences to see if it's a good candidate for cleaning, distribution of locust lengths to find appropriate length cutoff(s)
+    _, ax  = plt.subplots(3, figsize = (6, 10))
+
+    # Compute centers of hist bins
+    conf_centers = np.linspace(*conf_range, n_bins)
+    conf_width = np.diff(conf_centers)[0]
+    len_centers = np.linspace(*len_range, n_bins)
+    len_width = np.diff(len_centers)[0]
+
+    # Plot bars for histograms
+    ax[0].bar(conf_centers, hist_bb_confs, conf_width)
+    ax[0].set_ylabel('Counts', fontsize = 17)
+    ax[0].set_xlabel('Bounding box confidences', fontsize = 17)
+
+    ax[1].bar(conf_centers, hist_head_confs, conf_width, alpha = 0.5, label = 'Head')
+    ax[1].bar(conf_centers, hist_tail_confs, conf_width, alpha = 0.5, label = 'Tail')
+    ax[1].set_ylabel('Counts', fontsize = 17)
+    ax[1].set_xlabel('Keypoint confidences', fontsize = 17)
+    ax[1].legend()
+
+    ax[2].bar(len_centers, hist_lens, len_width)
+    ax[2].set_ylabel('Counts', fontsize = 17)
+    ax[2].set_xlabel('Lengths', fontsize = 17)
+    cumul = np.cumsum(hist_lens)/np.sum(hist_lens)
+    idx_low = np.where(cumul > 0.1)[0][0]
+    idx_high = np.where(cumul > 0.99)[0][0]
+    ax[2].axvline(len_centers[idx_low], color = 'k', linestyle = '--')
+    ax[2].axvline(len_centers[idx_high], color = 'k', linestyle = '--', label = '10th/99th percentile')
+    ax[2].legend()
+
+    plt.tight_layout()
+    plt.savefig(output_dir + 'plots/kp_preprocess/unprocessed_hists.png')
+
+def remove_duplicates_graph(all_kps:np.ndarray, kp_confs:np.ndarray, kp_radius:float=20, centroid_radius:float=10):
+
+    n = len(all_kps)
+
+    # --- Precompute ---
+    heads = all_kps[:, 0, :]
+    tails = all_kps[:, 1, :]
+    centroids = (heads + tails) / 2
+    total_conf = np.mean(kp_confs, axis=1)
+
+    # 1. Build KDTree for keypoints (flattened)
+    all_kps = all_kps.reshape(-1, 2) # (n_kps, x/y)
+    kp_tree = cKDTree(all_kps)
+
+    pairs = np.array(list(kp_tree.query_pairs(r=kp_radius)))
+    if len(pairs) == 0:
+        return np.ones(n, dtype=bool)
+
+    # Map kp → detection
+    kp_to_det = pairs // 2  # (num_pairs, 2) -> kps alternate head/tail so index 0, 1 correspond to same detection, etc.
+
+    det_i = kp_to_det[:, 0]
+    det_j = kp_to_det[:, 1]
+
+    # Remove self-pairs
+    valid = det_i != det_j
+    det_i = det_i[valid]
+    det_j = det_j[valid]
+
+    # 2. Count how many kp matches per detection pair
+    edges = np.stack([det_i, det_j], axis=1)
+
+    # Normalize ordering (i < j)
+    edges = np.sort(edges, axis=1)
+
+    # Count occurrences
+    edge_ids, counts = np.unique(edges, axis=0, return_counts=True)
+
+    # Keep only strong matches (both keypoints matched)
+    strong_edges = edge_ids[counts >= 2]
+
+    # 3. Add centroid-based proximity edges
+    cent_tree = cKDTree(centroids)
+    cent_pairs = np.array(list(cent_tree.query_pairs(r=centroid_radius)))
+
+    if len(cent_pairs) > 0:
+        cent_pairs = np.sort(cent_pairs, axis=1)
+        strong_edges = np.vstack([strong_edges, cent_pairs])
+
+    # 4. Build graph (sparse adjacency)
+    if len(strong_edges) == 0:
+        return np.ones(n, dtype=bool)
+
+    row = strong_edges[:, 0]
+    col = strong_edges[:, 1]
+
+    adj = coo_matrix((np.ones(len(row)), (row, col)), shape=(n, n))
+
+    # Make symmetric
+    adj = adj + adj.T
+
+    # 5. Connected components
+    n_components, labels = connected_components(adj, directed=False)
+
+    # 6. Keep best detection per component
+    keep_mask = np.zeros(n, dtype=bool)
+
+    for comp in range(n_components):
+        idx = np.where(labels == comp)[0]
+
+        if len(idx) == 1:
+            keep_mask[idx[0]] = True
+            continue
+
+        best = idx[np.argmax(total_conf[idx])]
+        keep_mask[best] = True
+
+    return keep_mask
+
+def preprocess_frame(frame_num:int, f_in:h5py.File, f_out:h5py.File, tile_offsets:dict):
+
+    kp_confs = []
+    all_kps = []
+    frame_key = f'f{frame_num}'
+
+    # Skip frames that are already pre-processed
+    if frame_key in f_out.keys(): 
+        return
+
+    # Collect confidences and keypoints from each tile
+    for key in f_in[frame_key].keys():
+        kp_confs.append(f_in[frame_key][f"{key}/conf"][:])
+        keypoints = f_in[frame_key][f"{key}/xy"][:]
+        keypoints[:, :, 0] += tile_offsets[key][0]
+        keypoints[:, :, 1] += tile_offsets[key][1]
+        all_kps.append(keypoints) # Appending array of shape (num_detections, head/tail, x/y)
+
+    all_kps = np.concatenate(all_kps, axis=0) # (num_detections, head/tail, x/y)
+    kp_confs = np.concatenate(kp_confs, axis=0) # (num_detections, head/tail)
+
+    # Filter using locust lengths
+    lengths = np.linalg.norm((all_kps[:, 0, :] - all_kps[:, 1, :]), axis = 1) # (N,)
+    valid_lengths = lengths > 25 # Average length is 50
+    all_kps = all_kps[valid_lengths,:,:]
+    kp_confs = kp_confs[valid_lengths,:]
+
+    # Filter using kp and centroid proximities
+    keep_mask = remove_duplicates_graph(all_kps, kp_confs)
+    all_kps = all_kps[keep_mask]
+
+    # Save data to preprocessed .hdf5 file
+    centroids = np.mean(all_kps, axis = 1)
+    f_out[f'{frame_key}/head'] = all_kps[:, 0, :] # Save head keypoints
+    f_out[f'{frame_key}/tail'] = all_kps[:, 1, :] # Save tail keypoints
+    f_out[f'{frame_key}/conf'] = kp_confs # Save confidences of head and tail keypoints
+    f_out[f'{frame_key}/centroid'] = centroids # Save centroids computed from keypoints
+
+def preprocess_kps_fast(h5_in:str):
     '''
     Use confidences to fix likely duplicates of the same locust. Additionally, exclude single locusts whose two keypoints are too close together to be biologically plausible. Saves cleaned keypoints in a new h5 file.
     '''
 
+    # Name output file
     try:
         h5_out_path = h5_in.split('un')[0] + h5_in.split('un')[1]
     except:
         raise ValueError("Input h5 file name must contain 'unprocessed'.")
-
+    
+    # Open input and output file
     with h5py.File(h5_in, "r") as f_in, h5py.File(h5_out_path, 'a') as f_out:
+
+        # Compute tile offsets once before parallelizing
+        tile_offsets = {}
+        for key in f_in[list(f_in.keys())[0]].keys():
+            y = int(key.split('y')[1].split('_')[0])
+            x = int(key.split('x')[1].split('_')[0])
+            tile_offsets[key] = (y, x) # YOLO uses y for row, x for column of image
+
+        # Preprocess each frame separately
         for frame_num in tqdm(range(len(f_in.keys()))):
-            confs = []
-            all = []
-            frame_key = f'f{frame_num}'
-
-            if frame_key in f_out.keys(): # Skip frames that are already pre-processed
-                continue
-
-            for key in f_in[frame_key].keys():
-                confs.append(f_in[frame_key][f"{key}/conf"][:])
-                keypoints = f_in[frame_key][f"{key}/xy"][:]
-                keypoints[:, :, 0] += int(key.split('y')[1].split('_')[0]) # YOLO y is row index
-                keypoints[:, :, 1] += int(key.split('x')[1].split('_')[0]) # YOLO x is column index
-                all.append(keypoints) # (num_detections, head/tail, x/y)
-            
-            all_locusts = np.concatenate(all, axis=0) # (num_detections, head/tail, x/y)
-            centroids = np.mean(all_locusts, axis = 1) # (num_detections, x/y)
-            confs = np.concatenate(confs, axis=0) # (num_detections, head/tail)
-
-            # Trouble-shooting: visualize confidences
-            # fig, ax = plt.subplots(2)
-            # ax[0].hist(confs[:,0].flatten(), bins = 50)
-            # ax[0].hist(confs[:,1].flatten(), bins = 50)
-            # ax[0].legend(['Heads', 'Tails'])
-            # ax[0].set_xlabel('Confidence', fontsize = 14)
-            # ax[0].set_ylabel('Counts', fontsize = 14)
-            # ax[1].hist(np.diff(confs, axis=1).flatten(), bins = 50)
-            # ax[1].set_xlabel('Confidence difference (head - tail)', fontsize = 14)
-            # ax[1].set_ylabel('Counts', fontsize = 14)
-            # plt.tight_layout()
-            # plt.savefig('confidence_histograms.png')
-
-            # Use a confidence threshold to exclude low-confidence detections, which are more likely to be false positives and could interfere with the duplicate removal process.
-            conf_thresh = 0.01
-            valid_confs = (confs[:,0] > conf_thresh) & (confs[:,1] > conf_thresh) # Only keep detections where both head and tail have confidence above threshold
-            all_locusts = all_locusts[valid_confs, :, :]
-            centroids = centroids[valid_confs, :]
-            confs = confs[valid_confs, :]
-            
-            # Determine which bounding boxes have keypoints that are too close together to be biologically plausible (edge effect within tiles)
-            lengths = np.linalg.norm((all_locusts[:, 0, :] - all_locusts[:, 1, :]), axis = 1)
-            length_threshold = np.quantile(lengths, [0.05, 0.999]) # Min and max plausible locust length in pixels
-            # print(f"Length threshold for frame {frame_num}: {length_threshold}")
-
-            # Trouble-shooting: visualize lengths
-            # plt.hist(lengths, bins = 70)
-            # plt.xlabel('Locust lengths (px)', fontsize = 14)
-            # plt.ylabel('Counts', fontsize = 14)
-            # plt.savefig('length_histogram.png')
-
-            # Remove locusts with invalid lengths
-            valid_length = (np.linalg.norm((all_locusts[:, 0, :] - all_locusts[:, 1, :]), axis = 1) > length_threshold[0]) & (np.linalg.norm((all_locusts[:, 0, :] - all_locusts[:, 1, :]), axis = 1) < length_threshold[1])
-            all_locusts = all_locusts[valid_length, :, :]
-            centroids = centroids[valid_length, :]
-            confs = confs[valid_length, :]
-            all_kps = all_locusts.reshape(-1, 2) # (num_kps, 2), head and tail are alternating rows
-
-            # Create a keypoint to keypoint KDTree
-            tree = cKDTree(all_kps)
-            pairs = tree.query_pairs(r=20)
-            pairs = np.array(list(pairs)) # (num_pairs, 2), gives kp indices of pairs of kp in close proximity. Note that pairs are given in sorted order, so if (a, b) is in pairs, we know a < b.
-
-            # Check if BOTH keypoints are close to two keypoints in another, same bounding box
-            exclude = []
-            unique_kp_idcs = np.unique(pairs.flatten())
-            for kp_idx in unique_kp_idcs:
-                kp_detection_idx = kp_idx // 2
-                if kp_detection_idx in exclude: # If this keypoint already marked for exclusion as part of a duplicate pair, skip
-                    continue
-
-                kp_even = kp_idx % 2 == 0
-                kp_counterpart_idx = kp_idx + 1 if kp_even else kp_idx - 1
-
-                if kp_counterpart_idx in unique_kp_idcs: # If both kps in a bb are close to other kps, they may be a duplicate of another bb
-                    kp_pairs = np.concatenate([pairs[(pairs[:,0] == kp_idx),1], pairs[(pairs[:,1] == kp_idx),0]]) # Find all pairs that include this keypoint, whether it's the first or second element in the pair
-                    kp_counterpart_pairs = np.concatenate([pairs[(pairs[:,0] == kp_counterpart_idx),1], pairs[(pairs[:,1] == kp_counterpart_idx),0]])
-
-                    for pair in kp_pairs:
-                        pair_even = pair % 2 == 0
-                        pair_counterpart_idx = pair + 1 if pair_even else pair - 1
-
-                        if pair_counterpart_idx in kp_counterpart_pairs: # If the counterpart of the current keypoint is also close to the counterpart of the pair keypoint, we know for sure that these two bbs are duplicates of each other and we can exclude the one with the lower confidence.
-                            pair_detection_idx = pair // 2
-
-                            if np.sum(confs[kp_detection_idx]) >= np.sum(confs[pair_detection_idx]): # Keep current keypoint and its counterpart, exclude pair keypoint and its counterpart
-                                exclude.append(pair_detection_idx)
-                            else: # Keep pair keypoint and its counterpart, exclude current keypoint and its counterpart
-                                exclude.append(kp_detection_idx)
-                            break
-
-            # print(f'Original number of detections in the frame: {len(lengths)}')
-            # print(f'Number of valid-length detections in the frame: {len(all_locusts)}')
-            # print(f'Number of keypoints excluded as duplicates: {len(exclude) // 2}')
-
-            # If there are keypoints from different bbs that are VERY close together, check if either of the counterparts have low confidence (if so exclude)
-            tight_pairs = tree.query_pairs(r=3) # If keypoints from different detections are very close together, check if the counterpart has low confidence
-            tight_pairs = np.array(list(tight_pairs))
-            conf_thresh = 0.2
-            unique_kp_idcs = np.unique(tight_pairs.flatten())
-            for kp_idx in unique_kp_idcs:
-                kp_detection_idx = kp_idx // 2
-                if kp_detection_idx in exclude: # If this keypoint already marked for exclusion as part of a duplicate pair, skip
-                    continue
-
-                kp_even = kp_idx % 2 == 0
-
-                kp_pairs = np.concatenate([tight_pairs[(tight_pairs[:,0] == kp_idx),1], tight_pairs[(tight_pairs[:,1] == kp_idx),0]])
-                kp_counterpart_conf = confs[kp_detection_idx, int(not kp_even)] # Get the confidence of the counterpart keypoint
-                for pair in kp_pairs:
-                    if pair // 2 in exclude: # If the pair keypoint already marked for exclusion as part of a duplicate pair, skip
-                        continue
-                    pair_even = pair % 2 == 0
-                    pair_counterpart_idx = pair + 1 if pair_even else pair - 1
-
-                    pair_counterpart_conf = confs[pair // 2, int(pair_even)]
-
-                    if kp_counterpart_conf < conf_thresh and pair_counterpart_conf > kp_counterpart_conf:
-                        exclude.append(kp_detection_idx)
-                        break
-                    elif pair_counterpart_conf < conf_thresh and kp_counterpart_conf > pair_counterpart_conf:
-                        exclude.append(pair // 2)
-                        break
-            
-            # print(f'Number of locusts excluded due to tight proximity + low keypoint confidence: {len(exclude)}')
-            # print(f'Number of remaining detections: {len(all_locusts) - len(exclude) // 2}')
-
-            # Remove keypoints that are likely duplicates within and across tiles
-            all_locusts = np.delete(all_locusts, exclude, axis=0) # Remove single keypoint duplicates
-            centroids = np.delete(centroids, exclude, axis = 0)
-            confs = np.delete(confs, exclude, axis=0)
-
-            # Use centroids to determine if two detections are too close to be true (then take the one with higher overall confidence)
-            centroid_thresh = 10
-            tree = cKDTree(centroids)
-            tight_centroids = tree.query_pairs(r=centroid_thresh)
-            total_confs = np.mean(confs, axis=1)
-            exclude = []
-            for (a, b) in tight_centroids:
-                if a in exclude or b in exclude:
-                    continue
-                
-                if total_confs[a] > total_confs[b]:
-                    exclude.append(b)
-                else:
-                    exclude.append(a)
-            
-            # Remove keypoints that are likely duplicates across tiles
-            all_locusts = np.delete(all_locusts, exclude, axis=0) # Remove single keypoint duplicates
-            centroids = np.delete(centroids, exclude, axis = 0)
-            confs = np.delete(confs, exclude, axis=0)
-
-            # print(f'Number of excluded detections by centroid distance: {len(exclude)}')
-
-
-            # frames_path = Path(frames_dir)
-            # frames = sorted(frames_path.glob("*.jpg"))
-            # img_full = cv2.imread(frames[frame_num])
-
-            # plt.figure(figsize=(20, 20))
-            # plt.imshow(img_full)
-            # plt.scatter(all_locusts[:, 0, 0], all_locusts[:, 0, 1], s=0.1)
-            # plt.scatter(all_locusts[:, 1, 0], all_locusts[:, 1, 1], s=0.1)
-            # for line in range(all_locusts.shape[0]):
-            #     plt.plot(all_locusts[line,:,0], all_locusts[line,:,1], linewidth=0.5, color = 'w')
-            # plt.savefig(f"visualized_preprocessed_frame_{frame_num}_new.png")
-
-            # break
-
-            f_out[f'{frame_key}/head'] = all_locusts[:, 0, :] # Save head keypoints
-            f_out[f'{frame_key}/tail'] = all_locusts[:, 1, :] # Save tail keypoints
-            f_out[f'{frame_key}/conf'] = confs # Save confidences of head and tail keypoints
-            f_out[f'{frame_key}/centroid'] = centroids # Save centroids computed from keypoints
+            preprocess_frame(frame_num, f_in, f_out, tile_offsets)
