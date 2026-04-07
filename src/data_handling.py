@@ -256,7 +256,43 @@ def detections_h5_to_xr_dataset(h5_path:str, start_frame:int = 0, end_frame:int 
                     # 'conf_head': (['id'], conf_head_tail[:, 0]),
                     # 'conf_tail': (['id'], conf_head_tail[:, 1]),
                 },
-                coords={'frame': f_idx, 'id': np.arange(len(centroids))},
+                coords={'id': np.arange(len(centroids)), 'frame': f_idx},
+            )
+            datasets.append(ds)
+            if len(centroids) > max_detections:
+                max_detections = len(centroids)
+
+    full_ds = xr.concat(datasets, dim='frame', join='outer')
+    
+    return full_ds
+
+def detections_h5_to_kp_xr(h5_path:str, start_frame:int = 0, end_frame:int | None = None, rescale_factor:float = 1):
+
+    with h5py.File(h5_path, 'r') as f:
+        end_frame = min(end_frame, len(f.keys())) if end_frame is not None else len(f.keys())
+        datasets = []
+        max_detections = 0
+        for f_idx in tqdm(range(start_frame, end_frame)):
+            centroids = f[f'f{f_idx}']['centroid']
+            heads = f[f'f{f_idx}']['head']
+            tails = f[f'f{f_idx}']['tail']
+            # conf_head_tail = f[f'f{f_idx}']['conf']
+
+            ds = xr.Dataset(
+                {
+                    'centroid_x': (['id'], centroids[:, 0]*rescale_factor), # Rescale if necessary to match original image dimensions (e.g. if detections were made on downsampled images)
+                    'centroid_y': (['id'], centroids[:, 1]*rescale_factor),
+                    'theta': (['id'], np.arctan2(heads[:, 1] - tails[:, 1], heads[:, 0] - tails[:, 0])), # Orientation calculated from head and tail positions
+
+                    # Potentially useful but not currently used variables - can be added back in if needed for tracking or other analyses
+                    'head_x': (['id'], heads[:, 0]),
+                    'head_y': (['id'], heads[:, 1]),
+                    'tail_x': (['id'], tails[:, 0]),
+                    'tail_y': (['id'], tails[:, 1]),
+                    # 'conf_head': (['id'], conf_head_tail[:, 0]),
+                    # 'conf_tail': (['id'], conf_head_tail[:, 1]),
+                },
+                coords={'id': np.arange(len(centroids)), 'frame': f_idx},
             )
             datasets.append(ds)
             if len(centroids) > max_detections:

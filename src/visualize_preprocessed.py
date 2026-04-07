@@ -7,10 +7,7 @@ import seaborn as sns
 import os
 
 cwd = os.getcwd()
-if cwd.endswith('src'):
-    from helper_fns import *
-else:
-    from src.helper_fns import *
+from helper_fns import *
 
 
 '''_____________________________________________________PLOT FUNCTIONS____________________________________________________________'''
@@ -29,7 +26,7 @@ def plot_tracks(ds, output_dir: str, ids: np.array, start_frame:int = 0, end_fra
         plt.legend()
     plt.savefig(output_dir + 'original_tracks.png')
 
-def plot_smoothed_coords(ds, output_dir: str, id: int, smooth_names: list, start_frame: int = 0, end_frame: int | None = None): # Takes preprocessed xarray.Dataset as input that has raw and sg computed
+def plot_smoothed_coords(ds, output_dir: str, id: int, smooth_names: list[str], start_frame: int = 0, end_frame: int | None = None): # Takes preprocessed xarray.Dataset as input that has raw and sg computed
     
     frames = get_frame_slice(ds, start_frame, end_frame)
 
@@ -39,18 +36,33 @@ def plot_smoothed_coords(ds, output_dir: str, id: int, smooth_names: list, start
     
     for i, name in enumerate(smooth_names):
         for j, coord in enumerate(coords):
-            axs[j][i].plot(ds['frame'].isel(frame=frames), ds[coord + '_raw'].isel(id=id, frame=frames), label = 'Original')
-            axs[j][i].plot(ds['frame'].isel(frame=frames), ds[coord + '_' + name].isel(id=id, frame=frames), label = 'Smoothed', linestyle = '--')
-            if j == len(coords) - 1:
-                axs[j][i].set_xlabel('Frame', fontsize = 17)
-            if i == 0:
-                axs[j][i].set_ylabel(coord, fontsize = 17)
-            if j == 0:
-                axs[j][i].set_title(name, fontsize = 17)
-    axs[-1][-1].legend()
+            if len(smooth_names) > 1:
+                axs[j][i].plot(ds['frame'].isel(frame=frames), ds[coord + '_raw'].isel(id=id, frame=frames), label = 'Original')
+                axs[j][i].plot(ds['frame'].isel(frame=frames), ds[coord + '_' + name].isel(id=id, frame=frames), label = 'Smoothed', linestyle = '--')
+                if j == len(coords) - 1:
+                    axs[j][i].set_xlabel('Frame', fontsize = 17)
+                if i == 0:
+                    axs[j][i].set_ylabel(coord, fontsize = 17)
+                if j == 0:
+                    axs[j][i].set_title(name, fontsize = 17)
+            else:
+                if coord == 'v':
+                    ds['v'] = ds['velocity']
+                axs[j].plot(ds['frame'].isel(frame=frames), ds[coord].isel(id=id, frame=frames), label = 'Original')
+                axs[j].plot(ds['frame'].isel(frame=frames), ds[coord + '_' + name].isel(id=id, frame=frames), label = 'Smoothed', linestyle = '--')
+                if j == len(coords) - 1:
+                    axs[j].set_xlabel('Frame', fontsize = 17)
+                if i == 0:
+                    axs[j].set_ylabel(coord, fontsize = 17)
+                if j == 0:
+                    axs[j].set_title(name, fontsize = 17)
+    if len(smooth_names) > 1:
+        axs[-1][-1].legend()
+    else:
+        axs[-1].legend()
 
     plt.tight_layout()
-    plt.savefig(output_dir + 'smoothed_speeds.png')
+    plt.savefig(output_dir + f'smoothed_speeds_{smooth_names}.png')
 
 def plot_speed_hists(ds, output_dir: str, smooth_names: list): # Takes preprocessed xarray.Dataset as input
 
@@ -106,6 +118,7 @@ def plot_single_tracklet_lengths(ds, var: str, output_dir: str):
     plt.yscale('log')
     # plt.xscale('log')
     plt.savefig(output_dir + f'tracklet_lengths_{var}.png')
+    print(np.mean(tracklet_lengths))
 
 # def plot_tracklet_lengths_hist(ds_raw, speed_dict: dict, interp_dict: dict, radius: float, exp_name: str, batch_num: int, n_bins = 15):
 
@@ -176,7 +189,8 @@ def plot_ang_speed(ds, output_dir: str, smooth_name: str, start_frame: int = 0, 
     max_n = 0
 
     num_ids = 3
-    for id in range(num_ids):
+    ds_ids = ds['id'].values
+    for id in ds_ids[:num_ids]:
         for i in range(len(column_names)):
             fitted_speed = ds[f'{column_names[i]}'].sel(id=id, frame = frames)
             copy = fitted_speed.copy()
@@ -212,13 +226,14 @@ def plot_num_tracklets_over_time(ds:xr.Dataset, output_dir:str):
 		num_tracklets = np.sum(~np.isnan(ds['x']), axis = 1)
 	
 	frames = np.unique(ds.frame.values)
-		
+	
 	plt.figure(figsize=(12, 6))
 	plt.plot(frames, num_tracklets)
 	plt.xlabel('Frame', fontsize = 17)
 	plt.ylabel('Number of tracked individuals', fontsize = 17) # Assumes TReX at one point tracked all individuals
 	plt.title('Tracked individuals over time', fontsize = 17)
 	plt.savefig(output_dir + 'num_tracklets_over_time.png')
+    
 
 def corr_tracklet_length_density(ds, output_dir: str, nbrs, radius: float):
     # Look at correlation between tracklet length and density of neighbours

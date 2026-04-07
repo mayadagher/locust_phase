@@ -209,3 +209,26 @@ def get_metric_density(ds: xr.Dataset, pos_name: str, radius: float) -> xr.Datas
     ds[f"density_r_{radius}"] = (("id", "frame"), density)
 
     return ds
+
+def flatten_deep(nested):
+    result = []
+    for item in nested:
+        if isinstance(item, list) or isinstance(item, np.ndarray): # or isinstance(np.float64):
+            result.extend(flatten_deep(item))
+        else:
+            result.append(item)
+    return result
+
+def state_to_integer(state:np.ndarray):
+    return state.dot(1 << np.arange(state.size)[::-1]) # 1 << (bit-wise shift left) essentially turns state into 2**element for each element
+
+def integer_to_state(n:int, state_len:int):
+    """
+    Converts integer n into a binary array of specified length.
+    Uses bit-shifting for high performance.
+    """
+    # Create an array of bit positions: [2^7, 2^6, ..., 2^0] for length 8
+    powers = np.arange(state_len - 1, -1, -1)
+    
+    # Right shift n by each power and check the last bit
+    return (n >> powers) & 1

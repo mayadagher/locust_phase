@@ -114,7 +114,9 @@ def knn_step(positions, k):
     return nbr_full
 
 # Compute Voronoi neighbours for one frame
-def voronoi_step(positions, n_agents):
+def voronoi_step(positions):
+    valid_mask = ~np.isnan(positions).any(axis=1)
+    n_agents = np.sum(valid_mask)
     try:
         vor = Voronoi(positions)
     except Exception:
@@ -165,7 +167,7 @@ def compute_nbrs(ds, interaction: str, interaction_param=None):
             if n_agents < 3: # Voronoi requires at least 2 neighbours
                 nbr_list = [np.array([], dtype=int) for _ in range(n_agents)]
             else:
-                nbr_list = voronoi_step(positions, n_agents)
+                nbr_list = voronoi_step(positions)
 
         else:
             raise ValueError(f"Interaction {interaction} not implemented. Interaction must be either 'metric', 'topo', or 'voronoi'.")

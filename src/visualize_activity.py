@@ -3,7 +3,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from visualize_preprocessed import animate_trajs_coloured
+from animate import animate_trajs_coloured
 from helper_fns import *
 
 '''_____________________________________________________VISUALIZATION FUNCTIONS____________________________________________________________'''

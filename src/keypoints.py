@@ -15,7 +15,6 @@ import torch
 import numpy as np
 import h5py
 import matplotlib.pyplot as plt
-import h5py
 
 from scipy.spatial import cKDTree
 
@@ -137,7 +136,7 @@ def verify(model:YOLO, tile:torch.Tensor, tile_num:int):
     img = sv.cv2_to_pillow(annotated_frame)
     img.save(f'annotated_{tile_num}.jpg')
 
-def slice_img(model:YOLO, img_path:str, h5_out:h5py.File, frame_num:int, tile_size:int = 640, img_size = 7000, overlap:float = 0.3, iou:float = 0.5):
+def slice_img(model:YOLO, img_path:str, h5_out:h5py.File, frame_num:int, device:str, tile_size:int = 640, img_size = 7000, overlap:float = 0.3, iou:float = 0.5):
     '''
     Efficiently slices frame into overlapping tiles and appends them to an h5 file. Overlap is a fraction of the tile size. Image is assumed to be square.
     '''
@@ -170,7 +169,7 @@ def slice_img(model:YOLO, img_path:str, h5_out:h5py.File, frame_num:int, tile_si
             tile_idx += 1
 
     # Batch inference
-    results = model.predict(img_ten, save=False, imgsz=tile_size, save_txt=False, verbose=False, iou = iou)
+    results = model.predict(img_ten, save=False, imgsz=tile_size, save_txt=False, verbose=False, iou = iou, device = device)
     # results = model(img_ten)
 
     # Add results to h5 file
@@ -183,12 +182,23 @@ def slice_img(model:YOLO, img_path:str, h5_out:h5py.File, frame_num:int, tile_si
             h5_out[f'f{frame_num}/tile_{tile_idx}_x{x}_y{y}/conf'] = results[tile_idx].keypoints.conf.cpu() # (N, 2) = (N, head/tail)
             h5_out[f'f{frame_num}/tile_{tile_idx}_x{x}_y{y}/xy'] = results[tile_idx].keypoints.xy.cpu() # (N, 2, 2) = (N, head/tail, x/y)
 
-def slice_folder_to_h5(path_to_model:str, frames_dir: str, video_name: str, start_idx: int, stop_idx: int, chunk_size: int = 500, tile_size: int = 640, img_size: int = 7000, overlap: float = 0.3, iou: float = 0.5):
+def slice_folder_to_h5(path_to_model:str, frames_dir: str, h5_in: str, start_idx: int, stop_idx: int, chunk_size: int = 500, tile_size: int = 640, img_size: int = 7000, overlap: float = 0.3, iou: float = 0.5):
     """
     Slice frames [start_idx : stop_idx) into YOLO tiles and store results in a HDF5 file.
 
     Frames are processed in alphabetical order. If the file already exists, new results are appended (assuming whole frames are completed).
     """
+    # Set the device dynamically
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print('Using mps.')
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print('Using cuda.')
+    else:
+        device = torch.device("cpu")
+        print('Using cpu.')
+
     # Load model
     model = YOLO(path_to_model)
     frames_path = Path(frames_dir)
@@ -208,9 +218,9 @@ def slice_folder_to_h5(path_to_model:str, frames_dir: str, video_name: str, star
         chunk_start = chunk_idx * chunk_size
         chunk_end = min((chunk_idx + 1) * chunk_size, num_frames)
 
-        print(f"Starting chunk {chunk_idx + 1}/{num_chunks}: frames {start_idx + chunk_start} to {start_idx + chunk_end - 1} → /keypoints/{video_name}_unprocessed_kps.hdf5")
+        print(f"Starting chunk {chunk_idx + 1}/{num_chunks}: frames {start_idx + chunk_start} to {start_idx + chunk_end - 1} → {h5_in}")
 
-        with h5py.File(f'/keypoints/{video_name}_unprocessed_kps.hdf5', "a") as h5_out:
+        with h5py.File(h5_in, "a") as h5_out:
             for local_idx, frame_path in enumerate(tqdm(frames[chunk_start:chunk_end])):
                 global_frame_idx = start_idx + chunk_start + local_idx
 
@@ -218,7 +228,7 @@ def slice_folder_to_h5(path_to_model:str, frames_dir: str, video_name: str, star
                     print(f"Frame {global_frame_idx} already processed, skipping.")
                     continue
 
-                slice_img(model=model, img_path=str(frame_path), h5_out=h5_out, frame_num=global_frame_idx, tile_size=tile_size, img_size=img_size, overlap=overlap,)
+                slice_img(model=model, img_path=str(frame_path), h5_out=h5_out, frame_num=global_frame_idx, tile_size=tile_size, img_size=img_size, overlap=overlap, iou = iou, device = device)
 
 def visualize_frame_results(h5_file:str, img_path:str, frame_num:int):
 

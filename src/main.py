@@ -14,7 +14,11 @@ from visualize_time import *
 from image_analysis import *
 from keypoints import *
 from self_track import *
-
+from entropy import *
+from visualize_entropy import *
+from phase import *
+from visualize_phase import *
+from animate import *
 '''_____________________________________________________PARAMETERS____________________________________________________________'''
 
 # Training parameters
@@ -24,6 +28,18 @@ data_version = 8
 yolo_short_name = "yolo26"
 yolo_version = 'yolo26n-pose.pt'
 img_sz = 640
+
+# Keypoints path
+h5_kp='/keypoints/20230329_processed_kps.hdf5'
+kp_local_env = '/keypoints/20230329_local_env_2.hdf5'
+
+
+# Entropy params
+n_layers = 6
+n_ang0 = 16
+r_max = 200
+n_focals = 1000
+occ_path = f'/keypoints/20230329_{n_layers}_{n_ang0}_{r_max}_{n_focals}.hdf5'
 
 # Loading parameters
 batch_num = 1
@@ -58,6 +74,7 @@ quant_high = 0.5
 
 # Saving params
 suffix = ''
+plots_path = '/output/' + exp_name + '/'
 '''_____________________________________________________RUN CODE____________________________________________________________'''
 
 if __name__ == "__main__":
@@ -80,13 +97,72 @@ if __name__ == "__main__":
     # visualize_frame_results(h5_file='/keypoints/temp_test.hdf5', img_path='/original/20230329/video/65MP01_10Kmarching_01_2023-03-29_10-10-24-124.jpg', frame_num=0)
 
     # GET KEYPOINTS FOR WHOLE VIDEO
-    # slice_folder_to_h5(path_to_model = '/keypoints/best_kp_weights.pt', frames_dir = img_dir, video_name = '20230329', start_idx = 1792, stop_idx = 2200, chunk_size = 500, tile_size = 640, img_size = 7000, overlap = 0.3)
-
+    slice_folder_to_h5(path_to_model = '/keypoints/best_kp_weights.pt', frames_dir = img_dir, h5_in = '/keypoints/20230329_unprocessed_kps.hdf5', start_idx = 0, stop_idx = 20000, chunk_size = 200, tile_size = 640, img_size = 7000, overlap = 0.3)
+   
     # PREPROCESS KEYPOINTS TO GET RID OF DUPLICATES ACROSS TILES
     # preprocess_kps(h5_in='/keypoints/20230329_unprocessed_kps.hdf5', frames_dir = img_dir)
 
+    # ANIMATE KEYPOINTS
+    # ds_kp = detections_h5_to_kp_xr(h5_kp)
+    # GET KEYPOINTS FOR WHOLE VIDEO
+    # animate_zoom_out(ds_kp, img_dir, plots_path, start_frame = 0, end_frame = 250)
+
+    # COMPUTE ENTROPY
+    # ds = detections_h5_to_xr_dataset(h5_kp)
+    # occupancies, k_layers = compute_occupancy_fixed_dr(ds, n_layers, n_ang0, r_max, n_focals, rotation_null = False, shuffle_null = False)
+    # occ_da = xr.DataArray(
+    #     occupancies, 
+    #     dims=['frame', 'id', 'n_bins'],
+    #     coords={
+    #         'frame': np.arange(occupancies.shape[0]),
+    #         'id': np.arange(occupancies.shape[1]),
+    #         'bin': np.arange(occupancies.shape[2])},
+    #     name='occupancy_map')
+
+    # occ_ds = xr.Dataset(
+    #     data_vars={'occupancy': occ_da},
+    #     attrs={
+    #         'description': 'Local occupancy bin counts for social bubble analysis',
+    #         'units': 'binary_count',
+    #         'bin_resolution_cm': 0.5, # Example metadata
+    #         'created_at': '2026-03-27'
+    #     }
+    # )
+    # save_ds(occ_ds, occ_path, None)
+    # # null_occupancies, _ = compute_occupancy_fixed_dr(ds, n_layers, n_ang0, r_max, n_focals, rotation_null = True, shuffle_null = False)
+    # null_occupancies, _ = compute_occupancy_fixed_dr(ds, n_layers, n_ang0, r_max, n_focals, rotation_null = False, shuffle_null = True)
+    # n_samples = get_min_valids([occupancies, null_occupancies])
+    # # bin_occupation_histogram(occupancies, plots_path, k_layers, r_max, n_focals)
+    # entropy_over_time(occupancies, null_occupancies, 'Shuffle', plots_path, k_layers, n_samples, r_max, n_focals)
+    # # plot_pca(occupancies, plots_path, k_layers, r_max, n_focals)
+    # plot_bin_heatmap(occupancies, plots_path, k_layers, r_max)
+    # n_samples = get_min_valids([occupancies])
+    # state_hist(occupancies, plots_path, k_layers, n_samples, r_max, n_focals)
+
+    # occ_ds = load_preprocessed_data(occ_path)
+    # occupancies = occ_ds.values
+    # k_layers = [8, 24, 40]
+    # occupants_histogram(occupancies, plots_path, k_layers, r_max, n_focals)
+    # plot_density_bin_heatmap(occupancies, plots_path, k_layers, r_max)
+
+    # LOOK AT PHASE
+    # ds = load_preprocessed_data(kp_local_env)
+    # ds = get_local_env(ds, 'metric', 100) # 2 BL
+    # ds = get_local_env(ds, 'metric', 200) # 4 BL
+    # ds = get_local_env(ds, 'metric', 300) # 6 BL
+    # ds = get_local_env(ds, 'metric', 400) # 8 BL
+    # ds = get_local_env(ds, 'metric', 500) # 10 BL
+    # save_ds(ds, kp_local_env, None)
+    px_to_cm = 1/(3.7/50)**2 # Turns density values into /px**2 to /cm**2
+    # plot_phase(ds, 'density_metric_100', 'polarization_metric_100', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 2 BL', gridsize = 30, x_factor = px_to_cm)
+    # plot_phase(ds, 'density_metric_200', 'polarization_metric_200', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 4 BL', gridsize = 30, x_factor = px_to_cm)
+    # plot_phase(ds, 'density_metric_300', 'polarization_metric_300', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 6 BL', gridsize = 30, x_factor = px_to_cm)
+    # plot_distribution_over_time(ds, 'density_metric_200', r'Local density $(/cm^2)$', plots_path, 'Locality: 4 BL', y_factor = px_to_cm, y_bins = 30)
+    # plot_distribution_over_time(ds, 'polarization_metric_300', 'Polarization', plots_path, 'Locality: 6 BL', y_factor = 1)
+    # plot_distribution_over_time(ds, 'theta', r'$\theta$', plots_path, '', y_factor = 1)
+
     # TRACK WITH MAYOLO
-    track_kps(detections_h5_path='/keypoints/20230329_processed_kps.hdf5', output_dir='/keypoints/20230329_tracked_kps', start_frame=0, end_frame=8, max_frames_lost=3)
+    # track_kps(detections_h5_path='/keypoints/20230329_processed_kps.hdf5', output_dir='/keypoints/20230329_tracked_kps', start_frame=0, end_frame=8, max_frames_lost=3)
 
     # CREATE CSV FILE FOR TREX TRACKING
     # detections_h5_to_trex_csv('/keypoints/20230329_processed_kps.hdf5', '/keypoints/20230329_trex_input.csv', end_frame = 3)

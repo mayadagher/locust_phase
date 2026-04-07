@@ -119,27 +119,35 @@ def compute_speed(ds, speed_dict, fs: int = 5):
     '''Compute speed using methods specified by speed_types (a dictionary with speed type as keys and parameter dictionaries as values). fs is sample frequency and is used to compute minimum tracklet length used for smoothing (or a tracklet will be excluded).'''
     speed_types = list(speed_dict.keys())
 
+    # Make this function more general
+    if 'x_raw' not in ds:
+        x = ds['x']
+        y = ds['y']
+    else:            
+        x = ds['x_raw']
+        y = ds['y_raw']
+
     if 'raw' in speed_types: # Compute instantaneous speed from raw positions
-        ds['v_raw'] = np.hypot(ds['x_raw'].diff(dim = 'frame'), ds['y_raw'].diff(dim = 'frame'))
+        ds['v_raw'] = np.hypot(x.diff(dim = 'frame'), y.diff(dim = 'frame'))
 
     if 'high_ord' in speed_types: # Compute high-order derivatives
         high_ord_params = speed_dict['high_ord']
-        ds['x_high_ord'], vx_high_ord = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
-        ds['y_high_ord'], vy_high_ord = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
+        ds['x_high_ord'], vx_high_ord = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, x, input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
+        ds['y_high_ord'], vy_high_ord = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, y, input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
         
         # Get speed magnitude
         ds['v_high_ord'] = np.hypot(vx_high_ord, vy_high_ord)
 
     if 'moving_avg' in speed_types: # Compute moving average speed
         moving_params = speed_dict['moving_avg']
-        ds['x_moving_avg'] = ds['x_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
-        ds['y_moving_avg'] = ds['y_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
+        ds['x_moving_avg'] = x.rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
+        ds['y_moving_avg'] = y.rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
         ds['v_moving_avg'] = np.hypot(ds['x_moving_avg'].diff(dim='frame'), ds['y_moving_avg'].diff(dim='frame'))
 
     if 'moving_med' in speed_types: # Compute moving median speed
         moving_params = speed_dict['moving_med']
-        ds['x_moving_med'] = ds['x_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
-        ds['y_moving_med'] = ds['y_raw'].rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
+        ds['x_moving_med'] = x.rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
+        ds['y_moving_med'] = y.rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
         ds['v_moving_med'] = np.hypot(ds['x_moving_med'].diff(dim='frame'), ds['y_moving_med'].diff(dim='frame'))
 
     if 'sg' in speed_types: # Compute Savitzky-Golay smoothed speed
@@ -147,18 +155,19 @@ def compute_speed(ds, speed_dict, fs: int = 5):
         min_tracklet_length = np.ceil(5*sg_params['window_length'])
 
         # Smooth x and y (vectorized over ids)
-        ds['x_sg'] = xr.apply_ufunc(smooth_nantolerant, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs= {'func': sg_window, 'params': sg_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
-        ds['y_sg'] = xr.apply_ufunc(smooth_nantolerant, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs= {'func': sg_window, 'params': sg_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
+        ds['x_sg'] = xr.apply_ufunc(smooth_nantolerant, x, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs= {'func': sg_window, 'params': sg_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
+        ds['y_sg'] = xr.apply_ufunc(smooth_nantolerant, y, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs= {'func': sg_window, 'params': sg_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
 
         # Speed magnitude
         ds['v_sg'] = np.hypot(ds['x_sg'].diff(dim='frame'), ds['y_sg'].diff(dim='frame'))
 
     if 'butter' in speed_types: # Compute Butterworth filtered speed
         butter_params = speed_dict['butter']
-        min_tracklet_length = np.ceil(10*fs/butter_params['cutoff_freq'])
+        # min_tracklet_length = np.ceil(10*fs/butter_params['cutoff_freq'])
+        min_tracklet_length = 50
 
-        ds['x_butter'] = xr.apply_ufunc(smooth_nantolerant, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize = True,  kwargs={'func': butter_zero_phase, 'params': butter_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
-        ds['y_butter'] = xr.apply_ufunc(smooth_nantolerant, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize = True,  kwargs={'func': butter_zero_phase, 'params': butter_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
+        ds['x_butter'] = xr.apply_ufunc(smooth_nantolerant, x, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize = True,  kwargs={'func': butter_zero_phase, 'params': butter_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
+        ds['y_butter'] = xr.apply_ufunc(smooth_nantolerant, y, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize = True,  kwargs={'func': butter_zero_phase, 'params': butter_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
 
         # Speed magnitude
         ds['v_butter'] = np.hypot(ds['x_butter'].diff(dim='frame'), ds['y_butter'].diff(dim='frame'))
@@ -167,11 +176,12 @@ def compute_speed(ds, speed_dict, fs: int = 5):
         spline_params = speed_dict['spline']
         min_tracklet_length = 10*(spline_params['degree'] + 1)
 
-        ds['x_spline'] = xr.apply_ufunc(smooth_nantolerant, ds['x_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs={'func': spline_scipy, 'params': spline_params, 'min_tracklet_length': min_tracklet_length}, dask='parallelized')
-        ds['y_spline'] = xr.apply_ufunc(smooth_nantolerant, ds['y_raw'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs={'func': spline_scipy, 'params': spline_params, 'min_tracklet_length': min_tracklet_length}, dask='parallelized')
+        ds['x_spline'] = xr.apply_ufunc(smooth_nantolerant, x, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs={'func': spline_scipy, 'params': spline_params, 'min_tracklet_length': min_tracklet_length}, dask='parallelized')
+        ds['y_spline'] = xr.apply_ufunc(smooth_nantolerant, y, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs={'func': spline_scipy, 'params': spline_params, 'min_tracklet_length': min_tracklet_length}, dask='parallelized')
 
         # Speed magnitude
         ds['v_spline'] = np.hypot(ds['x_spline'].diff(dim='frame'), ds['y_spline'].diff(dim='frame'))
+
     return ds
 
 def exclude_borders(ds, radius): # Sets missing = 1 for individuals outside a circular region and nan for all other variables
@@ -239,72 +249,6 @@ def compute_tracklet_lengths_and_ids(missing_1d, fill_gaps):
 
         return lengths, segment_ids
 
-def compute_theta(ds, speed_dict):
-    """Compute heading direction and angular velocity."""
-    speed_types = list(speed_dict.keys())
-
-    def rolling_median_1d(x, window):
-        return (pd.Series(x).rolling(window=window, center=True, min_periods=1).median().to_numpy())
-
-    def smooth_theta_segment(seg, window):
-        """Unwrap → smooth → return unwrapped (segment-wise)."""
-        seg_unwrapped = np.unwrap(seg)
-        return rolling_median_1d(seg_unwrapped, window=window)
-
-    def circular_deriv(theta):
-        """NaN-safe angular derivative."""
-        theta = np.asarray(theta, dtype=float)
-        out = np.full_like(theta, np.nan)
-
-        valid = ~np.isnan(theta)
-        if valid.sum() < 2:
-            return out
-
-        theta_unwrapped = np.unwrap(theta[valid])
-        dtheta = np.diff(theta_unwrapped)
-
-        out[np.where(valid)[0][1:]] = dtheta
-        return out
-
-    for speed in speed_types:
-        # Raw heading (wrapped)
-        theta = np.arctan2(
-            ds[f'y_{speed}'].diff("frame"),
-            ds[f'x_{speed}'].diff("frame"),
-        ).reindex({"frame": ds.frame})
-
-        # Smooth theta (segment-wise unwrap handled internally)
-        theta_smooth = xr.apply_ufunc(
-            smooth_nantolerant,
-            theta,
-            input_core_dims=[["frame"]],
-            output_core_dims=[["frame"]],
-            vectorize=True,
-            dask="allowed",
-            output_dtypes=[float],
-            kwargs={
-                "func": smooth_theta_segment,
-                "params": {"window": 15},
-                "min_tracklet_length": 1,
-            },
-        )
-
-        # Wrap back to [-pi, pi)
-        ds[f"theta_{speed}"] = (theta_smooth + np.pi) % (2 * np.pi) - np.pi
-
-        # Angular velocity
-        ds[f"vtheta_{speed}"] = xr.apply_ufunc(
-            circular_deriv,
-            ds[f"theta_{speed}"],
-            input_core_dims=[["frame"]],
-            output_core_dims=[["frame"]],
-            vectorize=True,
-            dask="allowed",
-            output_dtypes=[float],
-        )
-
-    return ds
-
 def compute_theta(ds, spline_dict):
     """Compute heading direction and angular velocity."""
 
@@ -319,7 +263,7 @@ def compute_theta(ds, spline_dict):
         return seg_smoothed
 
     # Raw heading (wrapped)
-    theta = np.arctan2(ds[f'y'].diff("frame"), ds[f'x'].diff("frame")).reindex({"frame": ds.frame})
+    theta = np.arctan2(ds[f'y_spline'].diff("frame"), ds[f'x_spline'].diff("frame")).reindex({"frame": ds.frame})
 
     # Smooth theta (segment-wise unwrap handled internally)
     theta_unwrapped_smooth = xr.apply_ufunc(smooth_nantolerant, theta, input_core_dims=[["frame"]], output_core_dims=[["frame"]], vectorize=True, dask="allowed", output_dtypes=[float], kwargs={"func": smooth_theta_segment,
@@ -332,86 +276,6 @@ def compute_theta(ds, spline_dict):
     ds[f"theta_spline"] = wrap(theta_unwrapped_smooth)
 
     return ds
-
-# def compute_theta(ds, speed_dict):
-#     """Compute heading direction and angular velocity."""
-#     speed_types = list(speed_dict.keys())
-
-#     def hold_theta_below_speed(theta:xr.DataArray, speed:xr.DataArray, vmin:float):
-#         """
-#         Hold last valid orientation when speed drops below threshold.
-
-#         Parameters
-#         ----------
-#         theta : array-like
-#             Orientation in radians (may contain NaNs).
-#         speed : array-like
-#             Speed (same length as theta).
-#         vmin : float
-#             Speed threshold.
-
-#         Returns
-#         -------
-#         np.ndarray
-#             Orientation with zero-order hold applied.
-#         """
-#         theta = np.asarray(theta, dtype=float)
-#         speed = np.asarray(speed, dtype=float)
-
-#         out = np.full_like(theta, np.nan)
-
-#         last_theta = np.nan
-#         for i in range(len(theta)):
-#             if not np.isnan(theta[i]) and speed[i] >= vmin:
-#                 last_theta = theta[i]
-#                 out[i] = theta[i]
-#             elif speed[i] < vmin and not np.isnan(last_theta):
-#                 out[i] = last_theta
-#             else:
-#                 out[i] = np.nan
-
-#         return out
-
-#     def speed_weighted_avg(thetas, speeds):
-#         pass
-    
-#     def circular_deriv(theta):
-#         """NaN-safe angular derivative."""
-#         theta = np.asarray(theta, dtype=float)
-#         out = np.full_like(theta, np.nan)
-
-#         valid = ~np.isnan(theta)
-#         if valid.sum() < 2:
-#             return out
-
-#         theta_unwrapped = np.unwrap(theta[valid])
-#         dtheta = np.diff(theta_unwrapped)
-
-#         out[np.where(valid)[0][1:]] = dtheta
-#         return out
-    
-#     for speed in speed_types:
-#         # Raw heading (wrapped)
-#         theta = np.arctan2(ds[f'y_{speed}'].diff("frame"), ds[f'x_{speed}'].diff("frame")).reindex({"frame": ds.frame})
-
-#         # Hold theta for low speeds
-#         theta_fast = xr.apply_ufunc(hold_theta_below_speed, theta, ds[f'v_{speed}'], input_core_dims=[["frame"], ["frame"]], output_core_dims=[["frame"]], vectorize=True, dask="allowed", output_dtypes=[float], kwargs={"vmin": 0.05})
-
-#         # Wrap back to [-pi, pi)
-#         ds[f"theta_{speed}"] = (theta_fast + np.pi) % (2 * np.pi) - np.pi
-
-#         # Angular velocity
-#         ds[f"vtheta_{speed}"] = xr.apply_ufunc(
-#             circular_deriv,
-#             ds[f"theta_{speed}"],
-#             input_core_dims=[["frame"]],
-#             output_core_dims=[["frame"]],
-#             vectorize=True,
-#             dask="allowed",
-#             output_dtypes=[float],
-#         )
-
-#     return ds
 
 def compute_dist_from_center(ds, center=(1920/2, 1920/2)):
     ''' Compute distance from center for each individual at each frame using high_ord smoothed positions.'''
