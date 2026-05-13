@@ -9,6 +9,7 @@
     "source=/Users/mayadagher/Documents/Locusts/hangar/outputs/,target=/output,type=bind",
     "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/bb/,target=/bb,type=bind,readonly",
     "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/keypoints/,target=/keypoints,type=bind",
+    "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/mocap/,target=/mocap,type=bind",
     "source=/Users/mayadagher/Documents/Locusts/hangar/original/,target=/original,type=bind"
   ],
   "customizations": {

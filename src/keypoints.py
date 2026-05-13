@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
-from joblib import Parallel, delayed
 
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
 

@@ -24,3 +24,6 @@ PyYAML
 supervision==0.24.0
 torch
 torchvision
+imageio[ffmpeg]
+plotly
+shapely

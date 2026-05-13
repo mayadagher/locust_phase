@@ -19,6 +19,7 @@ from visualize_entropy import *
 from phase import *
 from visualize_phase import *
 from animate import *
+
 '''_____________________________________________________PARAMETERS____________________________________________________________'''
 
 # Training parameters
@@ -31,8 +32,9 @@ img_sz = 640
 
 # Keypoints path
 h5_kp='/keypoints/20230329_processed_complete.hdf5'
-kp_local_env = '/keypoints/20230329_local_env_2.hdf5'
-
+n_kp_batches = 5
+total_frames = 60466
+batch_len = np.ceil(total_frames/n_kp_batches).astype(int)
 
 # Entropy params
 n_layers = 6
@@ -40,6 +42,10 @@ n_ang0 = 16
 r_max = 200
 n_focals = 1000
 occ_path = f'/keypoints/20230329_{n_layers}_{n_ang0}_{r_max}_{n_focals}.hdf5'
+
+# Arena params (found using define_boundary.py)
+arena_center =  np.array([3527.08, 3520.27]) # px, found using define_boundary
+arena_radius = 3395.79 # px, found using define_boundary
 
 # Loading parameters
 batch_num = 1
@@ -60,7 +66,7 @@ fill_gaps = False
 params = {'speed_dict': speed_dict, 'interp_dict': interp_dict, 'fill_gaps': fill_gaps}
 
 # Visualizing and animating parameters
-vid_path = '/videos/20230329.mp4'
+vid_path = '/original/20230329/20230329.mp4'
 img_dir = '/original/20230329/video/'
 
 # Neighbour computation parameters
@@ -74,7 +80,7 @@ quant_high = 0.5
 
 # Saving params
 suffix = ''
-plots_path = '/output/' + exp_name + '/'
+plots_path = '/output/' + exp_name + '/kp_plots/'
 '''_____________________________________________________RUN CODE____________________________________________________________'''
 
 if __name__ == "__main__":
@@ -104,12 +110,15 @@ if __name__ == "__main__":
     # unprocessed_stats(h5_in = '/keypoints/20230329_unprocessed_complete.hdf5', subsample = 10, n_bins = 100, output_dir = plots_path)
 
     # ANIMATE KEYPOINTS
-    ds_kp = detections_h5_to_kp_xr(h5_kp)
+    # ds_kp = detections_h5_to_kp_xr(h5_kp)
     # GET KEYPOINTS FOR WHOLE VIDEO
-    animate_zoom_out(ds_kp, img_dir, plots_path, start_frame = 0, end_frame = 250)
+    # animate_zoom_out(ds_kp, img_dir, plots_path, start_frame = 0, end_frame = 150)
 
     # COMPUTE ENTROPY
-    # ds = detections_h5_to_xr_dataset(h5_kp)
+    subsample = 1
+    batch_idx = 1
+    # ds = detections_h5_to_xr_dataset(h5_kp, start_frame = batch_idx*batch_len, end_frame = (batch_idx+1)*batch_len, subsample = subsample)
+    # print('Keypoints loaded into xarray dataset.')
     # occupancies, k_layers = compute_occupancy_fixed_dr(ds, n_layers, n_ang0, r_max, n_focals, rotation_null = False, shuffle_null = False)
     # occ_da = xr.DataArray(
     #     occupancies, 
@@ -147,24 +156,90 @@ if __name__ == "__main__":
     # plot_density_bin_heatmap(occupancies, plots_path, k_layers, r_max)
 
     # LOOK AT PHASE
-    # ds = load_preprocessed_data(kp_local_env)
+    # h5_prep = f'/keypoints/20230329_preprocessed_complete_{round(5/subsample, 2)}Hz.hdf5'
+    h5_prep = f'/keypoints/20230329_preprocessed_complete_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5'
+    ds = load_preprocessed_data(h5_prep)
     # ds = get_local_env(ds, 'metric', 100) # 2 BL
     # ds = get_local_env(ds, 'metric', 200) # 4 BL
-    # ds = get_local_env(ds, 'metric', 300) # 6 BL
+    # ds = get_local_env(ds, 'voronoi', None, arena_center, arena_radius)
     # ds = get_local_env(ds, 'metric', 400) # 8 BL
     # ds = get_local_env(ds, 'metric', 500) # 10 BL
-    # save_ds(ds, kp_local_env, None)
+    # save_ds(ds, f'/keypoints/20230329_preprocessed_complete_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5', None)
     px_to_cm = 1/(3.7/50)**2 # Turns density values into /px**2 to /cm**2
+    px_to_m = 1/(3.7/50)**2*(100**2) # Turns density values into /px**2 to /m**2
     # plot_phase(ds, 'density_metric_100', 'polarization_metric_100', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 2 BL', gridsize = 30, x_factor = px_to_cm)
     # plot_phase(ds, 'density_metric_200', 'polarization_metric_200', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 4 BL', gridsize = 30, x_factor = px_to_cm)
-    # plot_phase(ds, 'density_metric_300', 'polarization_metric_300', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 6 BL', gridsize = 30, x_factor = px_to_cm)
+    # plot_phase(ds, 'density_metric_300', 'polarization_metric_300', plots_path, [r'Local density $(/m^2)$', 'Polarization'], 'Locality: 6 BL', gridsize = 30, x_factor = px_to_m)
+    # plot_phase(ds, 'density_voronoi_None', 'polarization_voronoi_None', plots_path, [r'Local density $(/m^2)$', 'Polarization'], 'Locality: First shell', gridsize = 30, x_factor = px_to_m)
     # plot_distribution_over_time(ds, 'density_metric_200', r'Local density $(/cm^2)$', plots_path, 'Locality: 4 BL', y_factor = px_to_cm, y_bins = 30)
     # plot_distribution_over_time(ds, 'polarization_metric_300', 'Polarization', plots_path, 'Locality: 6 BL', y_factor = 1)
-    # plot_distribution_over_time(ds, 'theta', r'$\theta$', plots_path, '', y_factor = 1)
+    # print('HERE')
+    # plot_distribution_over_time(ds, 'theta', r'$\theta$', plots_path, '', y_factor = 1, start_frame = 10000, end_frame = 15000, subsample = 5)
+    # plot_distribution_over_time(ds, 'theta', r'$\theta$', plots_path, '', y_factor = 1, start_frame = 33000, end_frame = 38000, subsample = 5)
+    # plot_distribution_over_time(ds, 'theta', r'$\theta$', plots_path, '', y_factor = 1, start_frame = 50000, end_frame = 55000, subsample = 5)
+
+    # plot_distribution_over_time(ds, 'density_metric_300', r'Local density $(/m^2)$', plots_path, '', y_factor = px_to_m, start_frame = 10000, end_frame = 15000, subsample = 5)
+    # plot_distribution_over_time(ds, 'density_metric_300', r'Local density $(/m^2)$', plots_path, '', y_factor = px_to_m, start_frame = 33000, end_frame = 38000, subsample = 5)
+    # plot_distribution_over_time(ds, 'density_metric_300', r'Local density $(/m^2)$', plots_path, '', y_factor = px_to_m, start_frame = 50000, end_frame = 55000, subsample = 5)
+
+    # plot_distribution_over_time(ds, 'polarization_metric_300', 'Polarization', plots_path, '', y_factor = 1, start_frame = 10000, end_frame = 15000, subsample = 5)
+    # plot_distribution_over_time(ds, 'polarization_metric_300', 'Polarization', plots_path, '', y_factor = 1, start_frame = 33000, end_frame = 38000, subsample = 5)
+    # plot_distribution_over_time(ds, 'polarization_metric_300', 'Polarization', plots_path, '', y_factor = 1, start_frame = 50000, end_frame = 55000, subsample = 5)
+
+
+    # jpeg_sequence_to_mp4(img_dir, plots_path, 13000, 14000, 12, 5) # Using inappropriate fps to make the clip faster
+    animate_phase(ds, plots_path, img_dir, 'density_voronoi_None', 'polarization_voronoi_None', [r'Local density $(/m^2)$', 'Polarization'], x_factor = px_to_m, y_factor = 1, start_frame = 0, end_frame = 300, vid_length = 300, fps = 5, subsample = 1, gridsize = 25, vmax = 125)
+    # animate_phase(ds, plots_path, img_dir, 'density_metric_300', 'polarization_metric_300', [r'Local density $(/m^2)$', 'Polarization'], 'Locality: 6 BL', x_factor = px_to_m, y_factor = 1, start_frame = int(50000/5), end_frame = int(55000/5), subsample = 2, frame_factor = 5)
+    # animate_param_overlay(ds, plots_path, img_dir, 'polarization_topo_3', 2, '3topo', 'Polarization', batch_idx, param_factor=1, start_frame=batch_idx*batch_len, end_frame=batch_idx*batch_len + 1000, vid_length=600, fps=5, subsample=1, frame_factor=subsample, gridsize=25)
 
     # TRACK WITH MAYOLO
     # track_kps(detections_h5_path='/keypoints/20230329_processed_kps.hdf5', output_dir='/keypoints/20230329_tracked_kps', start_frame=0, end_frame=8, max_frames_lost=3)
+    
+    # Test Voronoi overlay
+    # Define position array to save time from accessing ds
+    # positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
+    # z = ds['polarization_voronoi_None'].values # (n_frames, max_ids)
 
+    # # Filter out detections outside of arena
+    # dist_from_center = np.sqrt((positions[0] - arena_center[0])**2 + (positions[1] - arena_center[1])**2) # (n_frames, max_ids)
+    # outside_arena_mask = dist_from_center > arena_radius
+
+    # # Define valid mask
+    # valid_mask = (~np.isnan(positions).any(axis = 0)) & (~np.isnan(z)) & (~outside_arena_mask) # (n_frames, max_ids)
+
+    # valid_positions_t = positions[:, 0, valid_mask[0]] # (x/y, n_ids)
+
+    # ax, coll, areas, colours, num_nbrs = plot_voronoi_overlay(valid_positions_t.T, arena_center, arena_radius, z[0, valid_mask[0]], cmap = 'viridis')
+    # plt.gca().set_aspect('equal')
+    # plt.axis('off')
+    # plt.colorbar(coll, cmap = 'hsv', label = 'Theta')
+    # plt.savefig('voronoi_test_polarization.png')
+
+    # fig, ax = plt.subplots()
+    # ax.hist(areas, bins = 25)
+    # # ax.set_xscale('log')
+    # # ax.set_yscale('log')
+    # plt.savefig('vor_areas_test.png')
+    
+    # fig, ax = plt.subplots()
+    # plt.scatter(num_nbrs, areas)
+    # plt.savefig('vor_nbrs_vs_area_test.png')
+
+    # fig, ax = plt.subplots()
+    # plt.scatter(num_nbrs, colours)
+    # plt.savefig('vor_nbrs_vs_polarization.png')
+
+    # fig = plt.figure()
+    # ax = fig.add_subplot(projection='3d')
+    # ax.scatter(areas, num_nbrs, colours)
+    # ax.set_xlabel('Voronoi area')
+    # ax.set_ylabel('# of neighbours')
+    # ax.set_zlabel('Polarization')
+    # plt.savefig('vor_3d_scatter_test.png')
+    
+    # interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, batch_len = batch_len, batch_idx = batch_idx, start_frame = 0, end_frame = 100, subsample = 1, frame_factor = subsample, cmap = 'viridis')
+    
+    
     # CREATE CSV FILE FOR TREX TRACKING
     # detections_h5_to_trex_csv('/keypoints/20230329_processed_kps.hdf5', '/keypoints/20230329_trex_input.csv', end_frame = 3)
 
@@ -296,7 +371,7 @@ if __name__ == "__main__":
     # preprocess_save_all_batches(exp_name, num_batches=11, speed_dict=speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=True, radius=960, reprocess=False)
         
     # COUNT DETECTIONS OVER TIME ACROSS ALL FRAMES
-    # bb_detections, kp_detections = bb_vs_kp_detections_over_time(bb_h5 = '/bb/h5s/10K_full_2.hdf5', kp_preprocessed_h5 = '/keypoints/20230329_processed_kps.hdf5', plot = True)
+    # bb_detections, kp_detections = bb_vs_kp_detections_over_time(bb_h5 = '/bb/h5s/10K_full_2.hdf5', kp_preprocessed_h5 = '/keypoints/20230329_processed_complete.hdf5', plot = True)
 
     # COUNT TRACKLETS OVER TIME ACROSS ALL BATCHES
     # tracklets_over_time(speed_name='raw', num_batches=11, exp_name=exp_name, num_detections=num_detections)

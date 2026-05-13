@@ -5,6 +5,9 @@ import xarray as xr
 from sklearn.neighbors import BallTree
 from tqdm import tqdm
 from scipy.spatial.distance import pdist
+from scipy.spatial import Voronoi
+from helper_fns import clip_voronoi_region
+from shapely.geometry import Polygon
 
 from data_handling import *
 
@@ -27,7 +30,11 @@ def calculate_polarization(thetas):
     
     return polarization
 
-def local_env(pos_valid_t:np.ndarray, thetas_valid_t:np.ndarray, nbr_type:str, nbr_param:float | int | None):
+def local_env(pos_valid_t:np.ndarray, thetas_valid_t:np.ndarray, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float):
+
+    # Check if there are any valid positions
+    if len(pos_valid_t) < 1:
+        return np.array([]), np.array([])
 
     # Create ball tree for valid positions
     tree = BallTree(pos_valid_t)
@@ -56,14 +63,49 @@ def local_env(pos_valid_t:np.ndarray, thetas_valid_t:np.ndarray, nbr_type:str, n
         # Compute local density
         density_valid_t = nbr_param/np.array([np.pi*np.max(dist)**2 for dist in dists])
 
-    # Compute local polarization
+    elif nbr_type == 'voronoi':
+        
+        # Compute Voronoi tessellation
+        vor = Voronoi(pos_valid_t)
+
+        # Compute neighbour relationships from Voronoi ridges
+        nbrs = {i: set() for i in range(len(pos_valid_t))}
+        for i1, i2 in vor.ridge_points:
+            nbrs[i1].add(i2)
+            nbrs[i2].add(i1)
+        indcs = [sorted(list(v)) for v in nbrs.values()]
+
+        # Compute areas of each Voronoi neighbourhood
+        areas = np.full(len(pos_valid_t), np.nan)
+        for i in range(len(pos_valid_t)):
+
+            # Get correct region index
+            region_idx = vor.point_region[i]
+            reg = vor.regions[region_idx]
+
+            if len(reg) == 0:
+                continue
+
+            # Clip and order vertices
+            vertices = vor.vertices[np.array(reg)[(np.array(reg) != -1).astype(bool)].astype(int)]
+            poly = Polygon(clip_voronoi_region(vertices, arena_center, arena_radius, 0.05))
+
+            if poly.is_empty:
+                continue
+
+            areas[i] = poly.area
+
+        density_valid_t = np.array([len(nbrs) for nbrs in indcs])/areas
+    
+    else:
+        raise ValueError(f"Invalid nbr_type: {nbr_type}. Must be one of 'metric', 'topo', or 'voronoi'.")
+
+    # Compute local polarization, EXCLUDING focal individual
     polarizations_valid_t = np.array([calculate_polarization(thetas_valid_t[nbrs]) for nbrs in indcs])
 
     return density_valid_t, polarizations_valid_t
 
-
-
-def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None):
+def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float):
     '''
     Computes neighbour density and polarization locally.
     
@@ -71,14 +113,19 @@ def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None):
     ds: xr.Dataset containing 'centroid_x', 'centroid_y', 'theta'
     nbr_type: str indicating which type of neighbourhood to compute density and polarization on; one of 'metric', 'topo'
     nbr_param: int, float, or None parameter for finding neighbours; radius, k, or None for 'metric', 'topo', respectively
+    arena_params: list of [arena_center_x, arena_center_y, arena_radius]
     '''
 
     # Define position and theta array to save time from accessing ds
     positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
     thetas = ds['theta'].values # (n_frames, max_ids)
 
+    # Filter out detections outside of arena
+    dist_from_center = np.sqrt((positions[0] - arena_center[0])**2 + (positions[1] - arena_center[1])**2) # (n_frames, max_ids)
+    outside_arena_mask = dist_from_center > arena_radius
+
     # Define valid mask
-    valid_mask = (~np.isnan(positions).any(axis = 0)) & (~np.isnan(thetas)) # (n_frames, max_ids)
+    valid_mask = (~np.isnan(positions).any(axis = 0)) & (~np.isnan(thetas)) & (~outside_arena_mask) # (n_frames, max_ids)
 
     # Prep results
     densities = np.full(thetas.shape, np.nan)
@@ -93,7 +140,7 @@ def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None):
         thetas_valid_t = thetas[f, valid_mask[f]] # (n_valid, )
 
         # Get densities and polarizations for valid ids
-        density_valid_t, polarizations_valid_t = local_env(pos_valid_t, thetas_valid_t, nbr_type, nbr_param)
+        density_valid_t, polarizations_valid_t = local_env(pos_valid_t, thetas_valid_t, nbr_type, nbr_param, arena_center, arena_radius)
 
         # Update results
         densities[f, valid_mask[f]] = density_valid_t

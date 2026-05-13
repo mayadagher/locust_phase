@@ -15,7 +15,7 @@ def plot_phase(ds:xr.Dataset, x_var:str, y_var:str, output_dir:str, labels:list[
     """
 
     # Get flattened valid values for x and y
-    valid_mask = (~np.isnan(ds[x_var].values)) & (~np.isnan(ds[y_var].values))
+    valid_mask = (~np.isnan(ds[x_var].values)) & (~np.isnan(ds[y_var].values)) & (ds[x_var].values < np.nanquantile(ds[x_var].values, 0.999))
     x_valid = ds[x_var].values[valid_mask].flatten()*x_factor # Rescale if necessary
     y_valid = ds[y_var].values[valid_mask].flatten()
 
@@ -33,16 +33,12 @@ def plot_phase(ds:xr.Dataset, x_var:str, y_var:str, output_dir:str, labels:list[
     ax.set_xlabel(labels[0], fontsize=17)
     ax.set_ylabel(labels[1], fontsize=17)
     ax.set_title(title, fontsize=17, pad=15)
-    
-    # # Optional: Add common state labels
-    # ax.text(np.min(density), 0.1, " Swarm", color='white', alpha=0.7)
-    # ax.text(np.max(density), 0.9, " School/Milling ", color='white', ha='right', alpha=0.7)
 
     plt.grid(True, linestyle='--', alpha=0.3)
     plt.tight_layout()
     plt.savefig(output_dir + f'phase_space_{x_var}_{y_var}.png')
 
-def plot_distribution_over_time(ds: xr.Dataset, y_var: str, y_label:str, output_dir: str, title:str, y_factor:int = 1, fps:int = 5, y_bins:int =50, time_bins:int =200):
+def plot_distribution_over_time(ds: xr.Dataset, y_var: str, y_label:str, output_dir: str, title:str, y_factor:int = 1, fps:int = 5, start_frame:int = 0, end_frame:int = None, y_bins:int =50, time_bins:int =200, subsample:int = 1):
     """
     Plots a 2D histogram showing the evolution of the population's distribution.
     
@@ -52,13 +48,17 @@ def plot_distribution_over_time(ds: xr.Dataset, y_var: str, y_label:str, output_
     density_bins: Resolution of the y-axis (density values)
     time_bins: Resolution of the x-axis (how much to aggregate time)
     """
-    dist_array = ds[y_var].values
+
+    print('1')
+    dist_array = ds[y_var].isel(frame=slice(int(start_frame/subsample), int(end_frame/subsample))).values
+    print('2')
+    # dist_array = dist_array[start_frame:end_frame] # Subset frames if specified
     n_frames, n_ids = dist_array.shape
     
     # 1. Create coordinates for every single data point
     # Frame indices repeated for each individual
     frame_indices = np.arange(n_frames)
-    x = np.repeat(frame_indices, n_ids) / fps # Convert frames to seconds
+    x = np.repeat(frame_indices, n_ids)*subsample / fps # Convert frames to seconds
     
     # Flatten the density values
     y = dist_array.flatten()*y_factor # Rescale if necessary
@@ -83,4 +83,4 @@ def plot_distribution_over_time(ds: xr.Dataset, y_var: str, y_label:str, output_
     
     plt.grid(True, linestyle=':', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_dir + f'{y_var}_hist_over_time.png')
+    plt.savefig(output_dir + f'{y_var}_hist_over_time_{start_frame}_{end_frame}.png')

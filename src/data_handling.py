@@ -230,13 +230,13 @@ def detections_h5_to_trex_csv(h5_path:str, csv_path:str, start_frame:int = 0, en
 
                 writer.writerow([x, y, f_idx])
 
-def detections_h5_to_xr_dataset(h5_path:str, start_frame:int = 0, end_frame:int | None = None, rescale_factor:float = 1):
+def detections_h5_to_xr_dataset(h5_path:str, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, rescale_factor:float = 1):
 
     with h5py.File(h5_path, 'r') as f:
         end_frame = min(end_frame, len(f.keys())) if end_frame is not None else len(f.keys())
         datasets = []
         max_detections = 0
-        for f_idx in tqdm(range(start_frame, end_frame)):
+        for f_idx in tqdm(range(start_frame, end_frame, subsample)):
             centroids = f[f'f{f_idx}']['centroid']
             heads = f[f'f{f_idx}']['head']
             tails = f[f'f{f_idx}']['tail']
@@ -266,13 +266,13 @@ def detections_h5_to_xr_dataset(h5_path:str, start_frame:int = 0, end_frame:int 
     
     return full_ds
 
-def detections_h5_to_kp_xr(h5_path:str, start_frame:int = 0, end_frame:int | None = None, rescale_factor:float = 1):
+def detections_h5_to_kp_xr(h5_path:str, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, rescale_factor:float = 1):
 
     with h5py.File(h5_path, 'r') as f:
         end_frame = min(end_frame, len(f.keys())) if end_frame is not None else len(f.keys())
         datasets = []
         max_detections = 0
-        for f_idx in tqdm(range(start_frame, end_frame)):
+        for f_idx in tqdm(range(start_frame, end_frame, subsample)):
             centroids = f[f'f{f_idx}']['centroid']
             heads = f[f'f{f_idx}']['head']
             tails = f[f'f{f_idx}']['tail']
