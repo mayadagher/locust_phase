@@ -254,33 +254,6 @@ def integer_to_state(n:int, state_len:int):
     # Right shift n by each power and check the last bit
     return (n >> powers) & 1
 
-def clip_voronoi_to_circular_arena(regions, vertices, arena_bounds):
-    """
-    Clip Voronoi regions to circular arena.
-
-    arena_bounds = (center_x, center_y, radius)
-    """
-    center_x, center_y, radius = arena_bounds
-    arena = Point(center_x, center_y).buffer(radius)
-
-    clipped_polys = []
-
-    for region in regions:
-        polygon = vertices[region]
-        poly = Polygon(polygon)
-
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-
-        clipped = poly.intersection(arena)
-
-        if not clipped.is_empty:
-            clipped_polys.append(clipped)
-        else:
-            clipped_polys.append(None)
-
-    return clipped_polys
-
 def voronoi_finite_polygons_2d(vor, arena_x: int, arena_y: int, arena_radius: float):
     """
     Reconstruct infinite Voronoi regions to finite regions.
@@ -337,7 +310,7 @@ def voronoi_finite_polygons_2d(vor, arena_x: int, arena_y: int, arena_radius: fl
 
 import matplotlib.pyplot as plt
 
-def clip_voronoi_region(vertices: np.ndarray, arena_center:np.ndarray, arena_radius:float, rads_per_vertex:float):
+def clip_voronoi_region(vertices: np.ndarray, arena_center:np.ndarray, arena_radius:float, rads_per_vertex:float = 0.05):
 
     # Find invalid vertices
     invalid_mask = np.linalg.norm(vertices - arena_center, axis = 1) > arena_radius # (n_verts,)

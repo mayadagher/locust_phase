@@ -19,6 +19,7 @@ from visualize_entropy import *
 from phase import *
 from visualize_phase import *
 from animate import *
+from cluster_analysis import *
 
 '''_____________________________________________________PARAMETERS____________________________________________________________'''
 
@@ -160,7 +161,7 @@ if __name__ == "__main__":
     h5_prep = f'/keypoints/20230329_preprocessed_complete_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5'
     ds = load_preprocessed_data(h5_prep)
     # ds = get_local_env(ds, 'metric', 100) # 2 BL
-    # ds = get_local_env(ds, 'metric', 200) # 4 BL
+    # ds = get_local_env(ds, 'metric', 200, arena_center, arena_radius) # 4 BL
     # ds = get_local_env(ds, 'voronoi', None, arena_center, arena_radius)
     # ds = get_local_env(ds, 'metric', 400) # 8 BL
     # ds = get_local_env(ds, 'metric', 500) # 10 BL
@@ -188,7 +189,7 @@ if __name__ == "__main__":
 
 
     # jpeg_sequence_to_mp4(img_dir, plots_path, 13000, 14000, 12, 5) # Using inappropriate fps to make the clip faster
-    animate_phase(ds, plots_path, img_dir, 'density_voronoi_None', 'polarization_voronoi_None', [r'Local density $(/m^2)$', 'Polarization'], x_factor = px_to_m, y_factor = 1, start_frame = 0, end_frame = 300, vid_length = 300, fps = 5, subsample = 1, gridsize = 25, vmax = 125)
+    # animate_phase(ds, plots_path, img_dir, 'density_voronoi_None', 'polarization_voronoi_None', [r'Local density $(/m^2)$', 'Polarization'], x_factor = px_to_m, y_factor = 1, start_frame = 0, end_frame = 300, vid_length = 300, fps = 5, subsample = 1, gridsize = 25, vmax = 125)
     # animate_phase(ds, plots_path, img_dir, 'density_metric_300', 'polarization_metric_300', [r'Local density $(/m^2)$', 'Polarization'], 'Locality: 6 BL', x_factor = px_to_m, y_factor = 1, start_frame = int(50000/5), end_frame = int(55000/5), subsample = 2, frame_factor = 5)
     # animate_param_overlay(ds, plots_path, img_dir, 'polarization_topo_3', 2, '3topo', 'Polarization', batch_idx, param_factor=1, start_frame=batch_idx*batch_len, end_frame=batch_idx*batch_len + 1000, vid_length=600, fps=5, subsample=1, frame_factor=subsample, gridsize=25)
 
@@ -239,7 +240,22 @@ if __name__ == "__main__":
     
     # interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, batch_len = batch_len, batch_idx = batch_idx, start_frame = 0, end_frame = 100, subsample = 1, frame_factor = subsample, cmap = 'viridis')
     
+    # interactive_voronoi_distributions(ds, plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 100, subsample = 1, density_factor = px_to_m)
+    # interactive_voronoi_distributions(ds, plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 1000, subsample = 20, density_factor = px_to_m)
+
+    # plot_voronoi_corr_single_frame(ds, param = 'theta', frame_idx = 0, arena_center = arena_center, arena_radius = arena_radius, output_dir = plots_path, param_type = 'circular', title = 'Theta', subsample = 30)
+    # compare_corrs_single_frame(ds, param = 'polarization_voronoi_None', frame_idx = 0, arena_center = arena_center, arena_radius = arena_radius, output_dir = plots_path, param_type = 'scalar', title = 'Polarization (4 metric body lengths)', subsample = 1000, metric_n_bins = 50, distance_factor = px_to_m**(-0.5))
     
+    # analyse_clusters_single_frame(ds, frame_idx = 0, arena_center = arena_center, arena_radius = arena_radius, output_dir = plots_path, pol_thresh = 0.6, min_cluster_size = 2, area_factor = px_to_m**(-1))
+
+    # define_cycle(ds, output_dir = plots_path)
+    # find_reflections(ds, fps = 5)
+    interactive_cluster_analysis(ds, output_dir = plots_path, arena_center= arena_center, arena_radius= arena_radius, fps = 5, start_frame = 0, end_frame = None, subsample = 1,tolerance = 1e-6,
+    pol_thresh = 0.8,
+    min_cluster_size = 2,
+    area_factor = px_to_m**(-1))
+
+
     # CREATE CSV FILE FOR TREX TRACKING
     # detections_h5_to_trex_csv('/keypoints/20230329_processed_kps.hdf5', '/keypoints/20230329_trex_input.csv', end_frame = 3)
 

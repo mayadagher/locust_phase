@@ -1,0 +1,222 @@
+
+<style>
+h2.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.panel{background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:12px 14px}
+.panel-label{font-size:12px;color:var(--color-text-secondary);margin:0 0 6px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.crow{display:flex;align-items:center;gap:12px;margin:0 0 10px;padding:12px 14px;background:var(--color-background-secondary);border-radius:var(--border-radius-lg)}
+.fbadge{font-size:13px;font-weight:500;min-width:64px;text-align:center;padding:4px 10px;border-radius:var(--border-radius-md);background:var(--color-background-info);color:var(--color-text-info)}
+.srow{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.sc{background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:8px 10px}
+.sl{font-size:11px;color:var(--color-text-secondary);margin:0 0 2px}
+.sv{font-size:18px;font-weight:500;color:var(--color-text-primary);margin:0}
+.cnote{font-size:11px;color:var(--color-text-tertiary);margin:4px 0 0;text-align:right}
+</style>
+
+<h2 class="sr-only">Cluster analysis explorer with frame slider and minimum observations cutoff for layer charts.</h2>
+
+<div style="padding:1rem 0">
+
+<div class="crow">
+  <span style="font-size:13px;color:var(--color-text-secondary);white-space:nowrap">Relative frame</span>
+  <input type="range" id="frameSlider" min="-10" max="10" value="0" step="1" style="flex:1">
+  <span class="fbadge" id="frameLabel">t = 0</span>
+</div>
+
+<div class="crow" style="margin-bottom:16px">
+  <span style="font-size:13px;color:var(--color-text-secondary);white-space:nowrap">Min. observations per layer</span>
+  <input type="range" id="minObsSlider" min="1" max="20" value="5" step="1" style="flex:1">
+  <span style="font-size:13px;font-weight:500;min-width:28px;text-align:center;color:var(--color-text-primary)" id="minObsLabel">5</span>
+</div>
+
+<div class="srow">
+  <div class="sc"><p class="sl">Clusters detected</p><p class="sv" id="statN">—</p></div>
+  <div class="sc"><p class="sl">Avg. cluster size</p><p class="sv" id="statSize">—</p></div>
+  <div class="sc"><p class="sl">Avg. polarization</p><p class="sv" id="statPol">—</p></div>
+</div>
+
+<div class="g2">
+  <div class="panel"><p class="panel-label">Cluster size distribution (N)</p>
+    <div style="position:relative;height:180px"><canvas id="cNs" role="img" aria-label="Histogram of cluster sizes"></canvas></div></div>
+  <div class="panel"><p class="panel-label">Cluster area distribution (m²)</p>
+    <div style="position:relative;height:180px"><canvas id="cAreas" role="img" aria-label="Histogram of cluster areas"></canvas></div></div>
+  <div class="panel"><p class="panel-label">N vs area</p>
+    <div style="position:relative;height:180px"><canvas id="cScatter" role="img" aria-label="Scatter of cluster size vs area"></canvas></div></div>
+  <div class="panel"><p class="panel-label">Avg. density vs avg. polarization</p>
+    <div style="position:relative;height:180px"><canvas id="cDP" role="img" aria-label="Scatter of mean density vs mean polarization"></canvas></div></div>
+</div>
+
+<div class="g2">
+  <div class="panel"><p class="panel-label">Polarization by layer (from centre)</p>
+    <div style="position:relative;height:200px"><canvas id="cPLayer" role="img" aria-label="Polarization vs layer from centroid"></canvas></div>
+    <p class="cnote" id="notePLayer"></p></div>
+  <div class="panel"><p class="panel-label">Density by layer (from centre)</p>
+    <div style="position:relative;height:200px"><canvas id="cDLayer" role="img" aria-label="Density vs layer from centroid"></canvas></div>
+    <p class="cnote" id="noteDLayer"></p></div>
+  <div class="panel"><p class="panel-label">Polarization by layer (from edge)</p>
+    <div style="position:relative;height:200px"><canvas id="cPEdge" role="img" aria-label="Polarization vs layer from edge"></canvas></div>
+    <p class="cnote" id="notePEdge"></p></div>
+  <div class="panel"><p class="panel-label">Density by layer (from edge)</p>
+    <div style="position:relative;height:200px"><canvas id="cDEdge" role="img" aria-label="Density vs layer from edge"></canvas></div>
+    <p class="cnote" id="noteDEdge"></p></div>
+</div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const SAMPLE_DATA = await fetch('/output/20230329/kp_plots/voronoi_sliders/cluster_data.json').then(r => r.json());
+// keys will be strings — the slider handler needs: SAMPLE_DATA[String(t)]
+
+const TH = {indiv:'rgba(55,138,221,0.25)',mean:'#185FA5',grid:'rgba(128,128,128,0.12)',text:'#888780'};
+
+function makeBarChart(id, xLabel, yLabel, logY=false) {
+  return new Chart(document.getElementById(id), {
+    type:'bar',
+    data:{labels:[], datasets:[{data:[], backgroundColor:'rgba(55,138,221,0.5)', borderColor:'rgba(24,95,165,0.8)', borderWidth:0.5, borderRadius:2, barPercentage:0.95, categoryPercentage:1}]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{grid:{color:TH.grid}, ticks:{color:TH.text, font:{size:9}, maxTicksLimit:7, maxRotation:30}},
+        y:{type:logY?'logarithmic':'linear', grid:{color:TH.grid}, ticks:{color:TH.text, font:{size:10}},
+           title:{display:true, text:yLabel, font:{size:11}, color:TH.text}}
+      }
+    }
+  });
+}
+
+function makeScatterChart(id, xLabel, yLabel, logX=false, logY=false) {
+  return new Chart(document.getElementById(id), {
+    type:'scatter',
+    data:{datasets:[{data:[], backgroundColor:'rgba(55,138,221,0.6)', pointRadius:4}]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{type:logX?'logarithmic':'linear', title:{display:true, text:xLabel, font:{size:11}, color:TH.text}, grid:{color:TH.grid}, ticks:{color:TH.text, font:{size:10}, maxTicksLimit:6}},
+        y:{type:logY?'logarithmic':'linear', title:{display:true, text:yLabel, font:{size:11}, color:TH.text}, grid:{color:TH.grid}, ticks:{color:TH.text, font:{size:10}, maxTicksLimit:5}}
+      }
+    }
+  });
+}
+
+function makeLayerChart(id, xLabel, yLabel) {
+  return new Chart(document.getElementById(id), {
+    type:'line',
+    data:{labels:[], datasets:[]},
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{type:'category', title:{display:true, text:xLabel, font:{size:11}, color:TH.text}, grid:{color:TH.grid}, ticks:{color:TH.text, font:{size:10}, maxTicksLimit:10}},
+        y:{title:{display:true, text:yLabel, font:{size:11}, color:TH.text}, grid:{color:TH.grid}, ticks:{color:TH.text, font:{size:10}, maxTicksLimit:5}}
+      },
+      elements:{point:{radius:0}}
+    }
+  });
+}
+
+const charts = {
+  ns:      makeBarChart('cNs',    'N individuals',     'Count',            true, true),
+  areas:   makeBarChart('cAreas', 'Area (m²)',         'Count',            true, true),
+  scatter: makeScatterChart('cScatter', 'N individuals', 'Area (m²)',      true, true),
+  dp:      makeScatterChart('cDP', 'Avg. density (n/m²)', 'Avg. polarization', false, false),
+  pLayer:  makeLayerChart('cPLayer', 'Layer from centre', 'Avg. polarization'),
+  dLayer:  makeLayerChart('cDLayer', 'Layer from centre', 'Avg. density (n/m²)'),
+  pEdge:   makeLayerChart('cPEdge',  'Layers from edge',  'Avg. polarization'),
+  dEdge:   makeLayerChart('cDEdge',  'Layers from edge',  'Avg. density (n/m²)'),
+};
+
+function histogram(vals, nBins=12) {
+  if(!vals.length) return {counts:[],centers:[]};
+  const mn=Math.min(...vals), mx=Math.max(...vals);
+  if(mn===mx) return {counts:[vals.length],centers:[mn]};
+  const w=(mx-mn)/nBins, counts=Array(nBins).fill(0);
+  vals.forEach(v=>{let b=Math.floor((v-mn)/w);if(b===nBins)b=nBins-1;counts[b]++;});
+  return {counts, centers:Array.from({length:nBins},(_,i)=>+(mn+w*(i+0.5)).toFixed(2))};
+}
+
+function applyCutoff(rows, minObs) {
+  if(!rows.length) return 0;
+  const len = Math.max(...rows.map(r=>r.length));
+  for(let col=0; col<len; col++){
+    const obs = rows.reduce((acc,r)=> acc+(r[col]!=null&&!isNaN(r[col])?1:0), 0);
+    if(obs < minObs) return col;
+  }
+  return len;
+}
+
+function updateLayerChart(chart, noteEl, rows, minObs, xOffset) {
+  const cutCol = applyCutoff(rows, minObs);
+  const totalCols = rows.length ? Math.max(...rows.map(r=>r.length)) : 0;
+  const dropped = totalCols - cutCol;
+  const labels = Array.from({length:cutCol}, (_,i) => String(i + xOffset));
+
+  const indivDatasets = rows.map(row => ({
+    data: Array.from({length:cutCol}, (_,i) => (row[i]!=null&&!isNaN(row[i])) ? +row[i].toFixed(4) : null),
+    borderColor: TH.indiv, backgroundColor:'transparent',
+    borderWidth:0.8, tension:0.3, pointRadius:0, spanGaps:false,
+  }));
+
+  const means = Array.from({length:cutCol}, (_,col) => {
+    const vs = rows.map(r=>r[col]).filter(v=>v!=null&&!isNaN(v));
+    return vs.length ? +(vs.reduce((a,b)=>a+b,0)/vs.length).toFixed(4) : null;
+  });
+  const meanDataset = {
+    data: means, borderColor: TH.mean, backgroundColor:'transparent',
+    borderWidth:2, tension:0.3, pointRadius:0, spanGaps:false,
+  };
+
+  chart.data.labels = labels;
+  chart.data.datasets = [...indivDatasets, meanDataset];
+  chart.update('none');
+
+  noteEl.textContent = cutCol > 0
+    ? `Showing ${cutCol} layer${cutCol!==1?'s':''}${dropped>0?' · '+dropped+' dropped (< '+minObs+' obs)':' · no layers dropped'}`
+    : 'No layers meet the minimum observations threshold';
+}
+
+function render(t, minObs) {
+  const d = SAMPLE_DATA[t];
+  if(!d) return;
+
+  document.getElementById('frameLabel').textContent = `t = ${t>0?'+'+t:t}`;
+  document.getElementById('statN').textContent = d.ns.length;
+  document.getElementById('statSize').textContent = (d.ns.reduce((a,b)=>a+b,0)/d.ns.length).toFixed(1);
+  document.getElementById('statPol').textContent = (d.meanPols.reduce((a,b)=>a+b,0)/d.meanPols.length).toFixed(2);
+
+  const nsH = histogram(d.ns);
+  const nsMask = nsH.counts.map(c => c > 0);
+  charts.ns.data.labels          = nsH.centers.filter((_,i)=>nsMask[i]).map(v=>v.toFixed(0));
+  charts.ns.data.datasets[0].data = nsH.counts.filter((_,i)=>nsMask[i]);
+  charts.ns.update('none');
+
+  const arH = histogram(d.areas);
+  const arMask = arH.counts.map(c => c > 0);
+  charts.areas.data.labels          = arH.centers.filter((_,i)=>arMask[i]).map(v=>v.toFixed(1));
+  charts.areas.data.datasets[0].data = arH.counts.filter((_,i)=>arMask[i]);
+  charts.areas.update('none');
+
+  charts.scatter.data.datasets[0].data = d.ns.map((n,i)=>({x:n, y:+d.areas[i].toFixed(2)}));
+  charts.scatter.update('none');
+
+  charts.dp.data.datasets[0].data = d.meanDs.map((dens,i)=>({x:+dens.toFixed(3), y:+d.meanPols[i].toFixed(3)}));
+  charts.dp.update('none');
+
+  updateLayerChart(charts.pLayer, document.getElementById('notePLayer'), d.p_by_layer,  minObs, 0);
+  updateLayerChart(charts.dLayer, document.getElementById('noteDLayer'), d.d_by_layer,  minObs, 0);
+  const maxEdge = Math.max(...d.p_from_edge.map(r=>r.length));
+  updateLayerChart(charts.pEdge, document.getElementById('notePEdge'), d.p_from_edge, minObs, -(maxEdge-1));
+  updateLayerChart(charts.dEdge, document.getElementById('noteDEdge'), d.d_from_edge, minObs, -(maxEdge-1));
+}
+
+let curT=0, curMinObs=5;
+document.getElementById('frameSlider').addEventListener('input', e=>{ curT=+e.target.value; render(curT,curMinObs); });
+document.getElementById('minObsSlider').addEventListener('input', e=>{
+  curMinObs=+e.target.value;
+  document.getElementById('minObsLabel').textContent=curMinObs;
+  render(curT,curMinObs);
+});
+render(0,5);
+</script>

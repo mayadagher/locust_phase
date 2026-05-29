@@ -8,16 +8,15 @@ from pathlib import Path
 import imageio
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
-from helper_fns import voronoi_finite_polygons_2d
 from matplotlib.collections import PolyCollection
 import plotly.graph_objects as go
 import plotly.colors as pc
+from plotly.subplots import make_subplots
+import json
 
 cwd = os.getcwd()
-if cwd.endswith('project'):
-    from helper_fns import *
-else:
-    from src.helper_fns import *
+from helper_fns import *
+from cluster_analysis import *
 
 '''_____________________________________________________ANIMATION FUNCTIONS____________________________________________________________'''
 
@@ -951,8 +950,180 @@ def interactive_voronoi_overlay(ds:xr.Dataset, param:str, output_dir:str, arena_
                       title='Voronoi Tessellation Over Time')
     
 
-    output_path = f"{output_dir}voronoi_sliders/voronoi_slider_{param}_{abs_frames[0]}_{abs_frames[1]}_subsample_{round(np.diff(abs_frames)[0])}.html"
+    output_path = f"{output_dir}voronoi_sliders/voronoi_slider_{param}_{abs_frames[0]}_{abs_frames[-1]}_fs_{fs/round(np.diff(abs_frames)[0])}.html"
     fig.write_html(output_path)
     print(f"Saved to {output_path}.")
 
     return
+
+def interactive_voronoi_distributions(ds:xr.Dataset, output_dir:str, arena_center:np.ndarray, arena_radius:float, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, n_bins: list[int] = [40, None, 30], fs:float = 5, density_factor:float = 1):
+
+    # Define position array to save time from accessing ds
+    positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
+    densities = ds['density_voronoi_None'].values*density_factor # (n_frames, max_ids)
+
+    # Filter out detections outside of arena
+    dist_from_center = np.sqrt((positions[0,:,:] - arena_center[0])**2 + (positions[1,:,:] - arena_center[1])**2) # (n_frames, max_ids)
+    outside_arena_mask = dist_from_center > arena_radius
+
+    # Define valid mask
+    valid_mask = (~np.isnan(positions).any(axis = 0)) & (~np.isnan(densities)) & (~outside_arena_mask) # (n_frames, max_ids)
+
+    # Get frames
+    abs_frames, ds_idcs = get_frame_slice(ds, start_frame, end_frame, subsample)
+
+    # Name parameters
+    titles = ['Voronoi areas', 'Voronoi neighbours', 'Voronoi densities']
+    xlabels = ['Area (㎡)', 'Number of neighbours (n)', 'Density (n/㎡)']
+    n_params = len(titles)
+
+    fig = make_subplots(rows=1, cols= 3, subplot_titles=titles, horizontal_spacing=0.08, vertical_spacing=0.12)
+
+    all_areas = []
+    all_nbr_counts = []
+
+    max_area = 0
+    max_nbrs = 0
+    max_density = np.quantile(densities[valid_mask], 0.999) # Some crazy outliers need to be excluded
+
+    # Iterate over each frame to collect area and nbr count data
+    for ds_idx in ds_idcs:
+
+        # Filter valid positions and z values
+        valid_positions_t = positions[:, ds_idx, valid_mask[ds_idx]].T # (n_ids, 2)
+
+        if valid_positions_t.shape[0] < 3:
+            continue
+
+        # Compute voronoi tessellation
+        vor = Voronoi(valid_positions_t)
+
+        # Now we don't care about the order of the polygons so we can compute the polygons in one line
+        polys = [Polygon(clip_voronoi_region(vor.vertices[np.array(region)[(np.array(region) != -1).astype(bool)].astype(int)], arena_center, arena_radius)) for region in vor.regions]
+
+        # Get areas of each polygon
+        areas = [poly.area/density_factor for poly in polys]
+
+        # Compute neighbour relationships from Voronoi ridges
+        nbrs = {i: set() for i in range(len(valid_positions_t))}
+        for i1, i2 in vor.ridge_points:
+            nbrs[i1].add(i2)
+            nbrs[i2].add(i1)
+        indcs = [sorted(list(v)) for v in nbrs.values()]
+        num_nbrs = np.array([len(nbrs) for nbrs in indcs])
+
+        # Append data to lists
+        all_areas.append(areas)
+        all_nbr_counts.append(num_nbrs)
+
+        # Update maxima
+        if np.max(areas) > max_area:
+            max_area = np.max(areas)
+        if np.max(num_nbrs) > max_nbrs:
+            max_nbrs = np.max(num_nbrs)
+
+    # Add ALL traces upfront (one per param per frame), only the first frame visible
+    maxes = [max_area, max_nbrs, max_density]
+    maxes_counts = [0, 0, 0]
+    
+    if not n_bins[1]: # If nbr bins not specified
+        n_bins[1] = max_nbrs
+
+    for f_idx, (frame_num, ds_idx) in enumerate(zip(abs_frames, ds_idcs)):
+        # Iterate over params to get each histogram
+        params = [all_areas[f_idx], all_nbr_counts[f_idx], densities[ds_idx, valid_mask[ds_idx]]]
+
+        for i, param in enumerate(params):
+            if i == 1:
+                bin_edges = np.arange(0, max_nbrs + 1)
+                counts, _ = np.histogram(param, bins = bin_edges, range = (0, maxes[i]))
+            else:
+                counts, bin_edges = np.histogram(param, bins=n_bins[i], range=(0, maxes[i]))
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+            if max(counts) > maxes_counts[i]:
+                maxes_counts[i] = max(counts)
+
+            fig.add_trace(go.Bar(x=bin_centers, y=counts,
+                                 name=titles[i],
+                                 showlegend=False,
+                                 visible=(f_idx == 0),  # only first frame visible initially
+                                 marker_color='steelblue',
+                                 marker_line_width=0), row=1, col=i + 1)
+
+    # Each slider step sets visibility: only the n_params traces for that frame are True
+    total_traces = positions.shape[1] * n_params
+    steps = []
+    for f_idx, frame_num in enumerate(abs_frames):
+        visibility = [False] * total_traces
+        for i in range(n_params):
+            visibility[f_idx * n_params + i] = True
+
+        steps.append({
+            'method': 'restyle',
+            'label': str(frame_num),
+            'args': [{'visible': visibility}],
+        })
+
+    sliders = [{
+        'active': 0,
+        'currentvalue': {'prefix': 'Frame: ', 'visible': True, 'xanchor': 'center'},
+        'pad': {'t': 50},
+        'steps': steps,
+    }]
+
+    fig.update_layout(
+        sliders=sliders,
+        bargap=0.02,
+        title_text='Distributions by Frame')
+
+    for i in range(n_params):
+        fig.update_xaxes(range=[0, maxes[i]], row=1, col=i + 1, title_text = xlabels[i])
+        fig.update_yaxes(range=[0, maxes_counts[i]], row=1, col=i + 1, title_text = 'Counts' if not i else '')
+
+    output_path = os.path.join(output_dir, f'voronoi_sliders/vor_distributions_{abs_frames[0]}_{abs_frames[-1]}_fs_{fs/round(np.diff(abs_frames)[0])}.html')
+    fig.write_html(output_path)
+    print(f'Saved to {output_path}')
+    return fig
+
+def export_for_plotly(aggregated: dict[int, list[FrameClusterStats]]) -> dict:
+    out = {}
+    for rel_frame, stats_list in aggregated.items():
+        # Pool all clusters across events at this offset
+        ns      = np.concatenate([s.ns      for s in stats_list]).tolist()
+        areas   = np.concatenate([s.areas   for s in stats_list]).tolist()
+        meanPols = np.concatenate([s.mean_pols       for s in stats_list]).tolist()
+        meanDs   = np.concatenate([s.mean_densities  for s in stats_list]).tolist()
+
+        def to_rows(key):
+            rows = []
+            for s in stats_list:
+                arr = getattr(s, key)
+                for row in arr:
+                    # replace nan with None for JSON
+                    rows.append([None if np.isnan(v) else round(float(v), 4) for v in row])
+            return rows
+
+        out[rel_frame] = {
+            "ns": ns, "areas": areas,
+            "meanPols": meanPols, "meanDs": meanDs,
+            "p_by_layer": to_rows("p_by_layer"),
+            "d_by_layer": to_rows("d_by_layer"),
+            "p_from_edge": to_rows("p_from_edge"),
+            "d_from_edge": to_rows("d_from_edge"),
+        }
+    return out
+
+def interactive_cluster_analysis(ds: xr.Dataset, output_dir: str, arena_center:np.ndarray, arena_radius:float, fps:int = 5, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1,tolerance: float = 1e-6,
+    pol_thresh: float = 0.8,
+    min_cluster_size: int = 2,
+    area_factor: float = 1):
+    
+    # Get relative frame indices of reflection events
+    event_frames, _, period_length = find_reflections(ds, fps, start_frame, end_frame, subsample)
+
+    # Compute cluster statistics relative to these events
+    aggregated = analyse_reflection_events(ds, event_frames, round(period_length/2), arena_center, arena_radius, tolerance, pol_thresh, min_cluster_size, area_factor)
+    
+    with open(output_dir + "voronoi_sliders/cluster_data.json", "w") as f:
+        json.dump(export_for_plotly(aggregated), f)

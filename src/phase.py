@@ -9,6 +9,7 @@ from scipy.spatial import Voronoi
 from helper_fns import clip_voronoi_region
 from shapely.geometry import Polygon
 
+
 from data_handling import *
 
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
@@ -133,6 +134,7 @@ def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, are
 
     # Iterate over frames
     n_frames = positions.shape[1]
+    print('Compute local environments at each frame.')
     for f in tqdm(range(n_frames)):
 
         # Find valid positions and thetas for this frame
@@ -182,5 +184,106 @@ def compute_g_of_r(points, arena_size, dr=10, max_r=1000):
     g_r = (2 * counts) / (rho * ring_areas * n_ids)
     
     return r_centers, g_r
-        
+
+
+
+# def voronoi_correlation_analysis(ds:xr.Dataset, param:str, arena_center:np.ndarray, arena_radius:float, focal_index: int, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, tolerance: float = 1e-6) -> tuple[list[Polygon], dict[int, int]]:
+#     '''
+#     Compute correlation length of variable using Voronoi layers as distance metric.
+ 
+#     Parameters
+#     ----------
+#     ds:
+#         xr.Dataset with coordinates (frame, id) and containing variable columns including var
+#     param:
+#         Variable column in xr.Dataset on which we want to do correlation analysis.
+#     arena_center:
+#         Numpy array with the coordinates of the arena center.
+#     arena_radius:
+#         Length of the arena radius.
+#     focal_index:
+#         Index into *points* of the focal animal / cell.
+#     start_frame:
+#         Relative index of first frame to be included in the splice for this computation.
+#     end_frame:
+#         Relative index of last frame to be included in the splice for this computation.
+#     subsample:
+#         Step size for computing frame splice, useful for covering wide temporal coverage without overwhelming long compute.
+#     tolerance:
+#         Passed to ``build_adjacency_graph``.
+ 
+#     Returns
+#     -------
+#     cells : list[Polygon]
+#         Clipped Voronoi cells.
+#     layers : dict[int, int]
+#         Layer assignment for each cell (−1 = unreachable).
+#     '''
+
+#     # Define position array to save time from accessing ds
+#     positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
+#     z = ds[param].values # (n_frames, max_ids)
+
+#     # Filter out detections outside of arena
+#     dist_from_center = np.sqrt((positions[0,:,:] - arena_center[0])**2 + (positions[1,:,:] - arena_center[1])**2) # (n_frames, max_ids)
+#     outside_arena_mask = dist_from_center > arena_radius
+
+#     # Define valid mask
+#     valid_mask = (~np.isnan(positions).any(axis = 0)) & (~np.isnan(z)) & (~outside_arena_mask) # (n_frames, max_ids)
+
+#     # Get frames
+#     abs_frames, ds_idcs = get_frame_slice(ds, start_frame, end_frame, subsample)
+
+#     # Iterate over frames
+#     for f in ds_idcs:
+#         # Filter valid positions and z values
+#         valid_positions_t = positions[:, f, valid_mask[f]]  # (2, n_ids)
+
+#         if valid_positions_t.shape[1] < 3:
+#             continue
+
+#         # Create tessellation
+#         vor = Voronoi(valid_positions_t.T)
+
+#         polys_t = []
+#         z_t = []
+
+#         # Iterate over each point to ensure order is conserved
+#         for point_idx, z_val in enumerate(z[f, valid_mask[f]]):
+#             region_idx = vor.point_region[point_idx]
+#             region = vor.regions[region_idx]
+
+#             # Exclude regions with no points
+#             if len(region) == 0:
+#                 continue
+
+#             # Clip and order vertices
+#             vertices = vor.vertices[np.array(region)[(np.array(region) != -1).astype(bool)].astype(int)]
+#             poly = Polygon(clip_voronoi_region(vertices, arena_center, arena_radius, 0.05))
+
+#             if poly.is_empty:
+#                 continue
+
+#             # Append to lists so that indices of polys and zs align
+#             polys_t.append(poly)
+#             z_t.append(z_val)
+
+#         # Build adjacency graph between vertices
+#         graph = build_adjacency_graph(polys_t, tolerance=tolerance)
+
+#         # Compute Voronoi layers for all individuals
+#         layers_t:list[dict[int, int]] = []
+#         corrs_t
+#         for focal_index in range(len(polys_t)):
+#             layers = compute_layers(graph, focal_index)
+
+#             # Compute correlations binned by Voronoi distance
+#             corrs: dict[int, list] = 
+
+
+#     return cells, layers
+
+# graph = {0: set([1, 2, 3]), 1: set([0, 2]), 2: set([0, 1, 4]), 3: set([0, 4]), 4: set([2, 3])}
+# layers = compute_layers(graph, 1)
+# print(layers)        
 
