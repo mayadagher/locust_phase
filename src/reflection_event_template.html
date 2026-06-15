@@ -65,8 +65,6 @@ h2.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
-const SAMPLE_DATA = await fetch('/output/20230329/kp_plots/voronoi_sliders/cluster_data.json').then(r => r.json());
-// keys will be strings — the slider handler needs: SAMPLE_DATA[String(t)]
 
 const TH = {indiv:'rgba(55,138,221,0.25)',mean:'#185FA5',grid:'rgba(128,128,128,0.12)',text:'#888780'};
 
@@ -207,8 +205,8 @@ function render(t, minObs) {
   updateLayerChart(charts.pLayer, document.getElementById('notePLayer'), d.p_by_layer,  minObs, 0);
   updateLayerChart(charts.dLayer, document.getElementById('noteDLayer'), d.d_by_layer,  minObs, 0);
   const maxEdge = Math.max(...d.p_from_edge.map(r=>r.length));
-  updateLayerChart(charts.pEdge, document.getElementById('notePEdge'), d.p_from_edge, minObs, -(maxEdge-1));
-  updateLayerChart(charts.dEdge, document.getElementById('noteDEdge'), d.d_from_edge, minObs, -(maxEdge-1));
+  updateLayerChart(charts.pEdge, document.getElementById('notePEdge'), d.p_from_edge, minObs, 0); // -(maxEdge-1));
+  updateLayerChart(charts.dEdge, document.getElementById('noteDEdge'), d.d_from_edge, minObs, 0); // -(maxEdge-1));
 }
 
 let curT=0, curMinObs=5;

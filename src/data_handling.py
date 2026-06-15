@@ -301,4 +301,85 @@ def detections_h5_to_kp_xr(h5_path:str, start_frame:int = 0, end_frame:int | Non
     full_ds = xr.concat(datasets, dim='frame', join='outer')
     
     return full_ds
+
+def cluster_stats_to_h5(aggregated: dict[int, list], output_path: str):
+    """
+    Save aggregated cluster stats to HDF5.
+
+    Layout per absolute frame group:
+        /0/
+            ns, areas, medPols, varPols, medDs, varDs, meanThetas, varThetas
+                -- 1D float/int arrays, one entry per cluster, no nans
+
+            p_by_layer_data, p_by_layer_indptr    --|
+            d_by_layer_data, d_by_layer_indptr      |-- CSR format for ragged
+            p_from_edge_data, p_from_edge_indptr    |   layer arrays
+            d_from_edge_data, d_from_edge_indptr  --|
+                indptr[i]:indptr[i+1] gives the finite values for cluster i
+    """
+    with h5py.File(output_path, 'w') as f:
+        for abs_frame, stats_list in aggregated.items():
+
+            grp = f.create_group(str(abs_frame))
+
+            # ── Flat per-cluster arrays (no nans by construction) ─────────────
+            for key, attr in [('ns', 'ns'), ('centroids', 'centroids'), ('areas', 'areas'), ('medPols', 'median_pols'), ('varPols', 'var_pols'), ('medDs', 'median_densities'), ('varDs', 'var_densities'),
+                              ('meanThetas', 'mean_thetas'), ('varThetas', 'var_thetas')]:
+
+                grp.create_dataset(key, data=np.concatenate([getattr(s, attr) for s in stats_list]).astype(np.float32), compression='gzip')
+
+            # ── Ragged layer arrays stored as CSR ─────────────────────────────
+            def write_csr(name: str, attr: str):
+                data_buf, indptr = [], [0]
+                for s in stats_list:
+                    arr = getattr(s, attr)          # (n_clusters, max_layers), nan-padded
+                    for row in arr:
+                        finite = row[~np.isnan(row)].astype(np.float32)
+                        data_buf.append(finite)
+                        indptr.append(indptr[-1] + len(finite))
+                grp.create_dataset(f'{name}_data',   data=np.concatenate(data_buf), compression='gzip')
+                grp.create_dataset(f'{name}_indptr', data=np.array(indptr, dtype=np.int32), compression='gzip')
+
+            write_csr('p_by_layer',   'p_by_layer')
+            write_csr('d_by_layer',   'd_by_layer')
+            write_csr('p_from_edge',  'p_from_edge')
+            write_csr('d_from_edge',  'd_from_edge')
+
+            grp.attrs['n_clusters'] = sum(len(s.ns) for s in stats_list)
+
+    print(f'Saved to {output_path}')
+
+def load_cluster_stats_h5(input_path: str) -> dict[str, dict]:
+    """
+    Load HDF5 back into the same dict structure as export_for_plotly,
+    but with np.arrays instead of lists (and no Nones — nans where needed).
+    """
+    out = {}
+
+    with h5py.File(input_path, 'r') as f:
+        for group_name in f:
+            grp = f[group_name]
+            rel_frame = group_name  # keep as string key e.g. 'rel_+0'
+
+            entry = {}
+
+            # Flat arrays
+            for key in ['ns', 'centroids', 'areas', 'medPols', 'varPols', 'medDs', 'varDs', 'meanThetas', 'varThetas']:
+                entry[key] = grp[key][:]
+
+            # Ragged CSR -> list of 1D arrays (no padding needed, Plotly handles variable length)
+            def read_csr(name: str) -> list[np.ndarray]:
+                data   = grp[f'{name}_data'][:]
+                indptr = grp[f'{name}_indptr'][:]
+                # return [data[indptr[i]:indptr[i+1]] for i in range(len(indptr) - 1)]
+                return {'data': data, 'indptr': indptr}
+
+            entry['p_by_layer']  = read_csr('p_by_layer')
+            entry['d_by_layer']  = read_csr('d_by_layer')
+            entry['p_from_edge'] = read_csr('p_from_edge')
+            entry['d_from_edge'] = read_csr('d_from_edge')
+
+            out[rel_frame] = entry
+
+    return out
     

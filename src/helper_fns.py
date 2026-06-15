@@ -8,18 +8,6 @@ from shapely.geometry import Polygon, Point
 
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
 
-# def get_frame_slice(ds: xr.Dataset, start:int = 0, end:int | None = None):
-#     '''Return slice of frames from relative frame numbers (0, 1, 2, ...) in absolute frame numbers.'''
-
-#     first_global, last_global = int(ds.frame.min()), int(ds.frame.max())
-#     start = max(first_global, start)
-
-#     global_frames = range(start, end or (last_global + 1))
-
-#     assert len(global_frames), f"Start frame must be less than end frame. Got start={start}, end={end or (last_global + 1)}."
-
-#     return global_frames
-
 def get_frame_slice(ds:xr.Dataset, rel_start:int = 0, rel_end:int | None = None, in_function_subsample:int = 1):
     '''Handle complex combinations of subsampling (ds-level or in-function) and relative start frames. Returns slice of frames in absolute numbers, and indices for selected frames.'''
 
@@ -434,15 +422,28 @@ def clip_voronoi_region(vertices: np.ndarray, arena_center:np.ndarray, arena_rad
         print('Warning: redundant vertices for polygon with more than 3 sides.')
         print(old_vertices)
 
-    # fig, ax = plt.subplots()
-
-    # ax.scatter(old_vertices[:,0], old_vertices[:,1])
-    # ax.scatter(vertices[:, 0], vertices[:, 1])
-    # cir = plt.Circle(arena_center, arena_radius, alpha = 0.3, color= 'g')
-    # ax.add_patch(cir)
-    # ax.set_xlim([3700, 4400])
-    # ax.set_ylim([6700,  6950])
-    # plt.savefig('ridge_line_clip_test.png')
-
     return vertices
 
+def fft_timeseries(time_series, sample_rate=1.0):
+    """
+    Returns
+    -------
+    freqs        : array of frequencies (positive only)
+    power        : single-sided power spectrum
+    phase        : phase at each frequency (radians)
+    dominant_freq: frequency with peak power
+    """
+    ts = np.asarray(time_series, dtype=float)
+    ts -= ts.mean()          # remove DC offset
+    n = len(ts)
+
+    fft_vals = np.fft.rfft(ts)
+    freqs    = np.fft.rfftfreq(n, d=1.0 / sample_rate)
+
+    power    = (np.abs(fft_vals) ** 2) * (2.0 / n)   # single-sided, normalised
+    power[0] = 0.0                                     # zero out DC bin
+    phase    = np.angle(fft_vals)
+
+    dominant_freq = freqs[np.argmax(power)]
+
+    return freqs, power, phase, dominant_freq

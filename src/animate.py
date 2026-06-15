@@ -12,11 +12,15 @@ from matplotlib.collections import PolyCollection
 import plotly.graph_objects as go
 import plotly.colors as pc
 from plotly.subplots import make_subplots
-import json
+from data_handling import load_cluster_stats_h5
+from tqdm import tqdm
+import gc
+from cluster_analysis import find_reflections
+
+
 
 cwd = os.getcwd()
 from helper_fns import *
-from cluster_analysis import *
 
 '''_____________________________________________________ANIMATION FUNCTIONS____________________________________________________________'''
 
@@ -848,8 +852,8 @@ def interactive_voronoi_overlay(ds:xr.Dataset, param:str, output_dir:str, arena_
     # Set up colour bins
     colourscale = pc.sample_colorscale(cmap, n_bins)
     z_min, z_max = np.nanmin(z), np.nanmax(z)
-    if z_max > 10*np.nanstd(z) + np.nanmean(z): # If maximum is an outlier, replace with more reasonable maximum
-        z_max = 5*np.nanstd(z) + np.nanmean(z)
+    # if z_max > 10*np.nanstd(z) + np.nanmean(z): # If maximum is an outlier, replace with more reasonable maximum
+    #     z_max = 5*np.nanstd(z) + np.nanmean(z)
     bins = np.linspace(z_min, z_max, n_bins + 1)
 
     # Filter out detections outside of arena
@@ -866,6 +870,7 @@ def interactive_voronoi_overlay(ds:xr.Dataset, param:str, output_dir:str, arena_
 
     # Track how many traces belong to each frame
     traces_per_frame = []
+    areas = []
 
     for f in ds_idcs:
         # Filter valid positions and z values
@@ -897,6 +902,8 @@ def interactive_voronoi_overlay(ds:xr.Dataset, param:str, output_dir:str, arena_
 
             if poly.is_empty:
                 continue
+
+            areas.append(poly.area)
 
             bin_idx = min(np.searchsorted(bins, z_val) - 1, n_bins - 1)
             pos = np.array(poly.exterior.coords)
@@ -1086,44 +1093,406 @@ def interactive_voronoi_distributions(ds:xr.Dataset, output_dir:str, arena_cente
     print(f'Saved to {output_path}')
     return fig
 
-def export_for_plotly(aggregated: dict[int, list[FrameClusterStats]]) -> dict:
-    out = {}
-    for rel_frame, stats_list in aggregated.items():
-        # Pool all clusters across events at this offset
-        ns      = np.concatenate([s.ns      for s in stats_list]).tolist()
-        areas   = np.concatenate([s.areas   for s in stats_list]).tolist()
-        meanPols = np.concatenate([s.mean_pols       for s in stats_list]).tolist()
-        meanDs   = np.concatenate([s.mean_densities  for s in stats_list]).tolist()
+def interactive_cluster_analysis(input_path: str, min_obs:int = 5, max_layers:int | None = None, n_bins:int = 21):
 
-        def to_rows(key):
-            rows = []
-            for s in stats_list:
-                arr = getattr(s, key)
-                for row in arr:
-                    # replace nan with None for JSON
-                    rows.append([None if np.isnan(v) else round(float(v), 4) for v in row])
-            return rows
-
-        out[rel_frame] = {
-            "ns": ns, "areas": areas,
-            "meanPols": meanPols, "meanDs": meanDs,
-            "p_by_layer": to_rows("p_by_layer"),
-            "d_by_layer": to_rows("d_by_layer"),
-            "p_from_edge": to_rows("p_from_edge"),
-            "d_from_edge": to_rows("d_from_edge"),
-        }
-    return out
-
-def interactive_cluster_analysis(ds: xr.Dataset, output_dir: str, arena_center:np.ndarray, arena_radius:float, fps:int = 5, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1,tolerance: float = 1e-6,
-    pol_thresh: float = 0.8,
-    min_cluster_size: int = 2,
-    area_factor: float = 1):
+    # Load data
+    data = load_cluster_stats_h5(input_path)
     
-    # Get relative frame indices of reflection events
-    event_frames, _, period_length = find_reflections(ds, fps, start_frame, end_frame, subsample)
+    # Relative frames in integers
+    rel_frames = np.arange(-1*round((len(data) - 1)/2), round((len(data) - 1)/2) + 1)
 
-    # Compute cluster statistics relative to these events
-    aggregated = analyse_reflection_events(ds, event_frames, round(period_length/2), arena_center, arena_radius, tolerance, pol_thresh, min_cluster_size, area_factor)
+    # Initialize extrema dictionaries and parameter strings
+    all_params = data['0'].keys()
+    max_x = {p: 0 for p in all_params}
+    max_x['medPols'], max_x['meanThetas'], max_x['p_by_layer'], max_x['p_from_edge'] = 1, np.pi, 1, 1
+    min_x = {p: 0 for p in all_params}
+    min_x['ns'], min_x['areas'], min_x['meanThetas'] = 2, np.inf, -np.pi
+
+    # Iterate over frames to collect maxima
+    for rel_idx in rel_frames:
+        
+        for param in ['ns', 'areas', 'varPols', 'medDs', 'varDs', 'varThetas', 'd_by_layer', 'd_from_edge']:
+
+            # Update maximum overall value
+            vals = data[str(rel_idx)][param]
+
+            if param == 'areas':
+                min_val = np.nanquantile(vals, 0.01)
+                if min_val < min_x[param]:
+                    min_x[param] = min_val
+
+            if type(vals) == dict: # If layers
+                max_val = np.nanquantile(vals['data'], 0.999) # Ignoring crazy outliers
+            else:
+                max_val = np.nanquantile(vals, 0.999)
+
+            if max_val > max_x[param]:
+                max_x[param] = float(max_val)
+
+        del vals
+
+    titles = ['N distribution', 'Area distribution', 'Mean θ distribution', 'Area vs N', 'Med. pol & density vs N', 'Var. pol & density vs N', 'θ vs N', 'Pol vs density',
+              'Polarization by layer (centre)', 'Polarization by layer (edge)', 'Density by layer (centre)', 'Density by layer (edge)']
+
+    # Initialize figure
+    fig = make_subplots(rows=3, cols=4, subplot_titles=titles, horizontal_spacing=0.16, vertical_spacing=0.12,
+                        specs=[[{"type": "bar"}, {"type": "bar"}, {"type": "bar"}, {"type": "scatter"}],
+                               [{"secondary_y": True}, {"secondary_y": True}, {"type": "scatter"}, {"type": "scatter"}],
+                               [{"type": "scatter"}, {"type": "scatter"}, {"type": "scatter"}, {"type": "scatter"}]])
+
+    # Histograms
+    hist_params = ['ns', 'areas', 'meanThetas']
+    max_counts = {p: 0 for p in hist_params}
+
+    # Scatterplots (Areas vs N, Pols/dens vs N, Std pol/den vs N, theta vs N, pol vs den)
+    scatter_x_params = ['ns', 'ns', 'ns', 'ns', 'medDs']
+    scatter_y_params = ['areas', ['medPols', 'medDs'], ['varPols', 'varDs'], 'meanThetas', 'medPols']
+    scatter_rows = [1, 2, 2, 2, 2]
+    scatter_cols = [4, 1, 2, 3, 4]
+
+    # Layer plots
+    layer_params = ['p_by_layer', 'p_from_edge', 'd_by_layer', 'd_from_edge']
+
+    # Dictionary for axis labels
+    label_dict = {'ns': 'N', 'areas': 'Area (㎡)', 'medPols': 'Med. polarization', 'varPols': 'Var. polarization', 'medDs': 'Med. density (n/㎡)',
+                  'varDs': 'Var. density (n/㎡)', 'meanThetas': 'Avg. θ (rad)', 'varThetas': 'Var. θ (rad)', 'p_by_layer': 'Med. polarization',
+                  'p_from_edge': 'Med. polarization', 'd_by_layer': 'Med. density (n/㎡)', 'd_from_edge': 'Med. density (n/㎡)'}
+
+    def plot_layers(csr_dict:dict[str: np.ndarray[float]], min_obs:int, max_layers:int | None, rel_idx:int):
+
+        # Unpack vals and idcs arrays
+        vals = csr_dict['data']
+        idcs = csr_dict['indptr']
+
+        # Convert csr to (n_clusters, n_layers) matrix
+        layers = np.full((len(idcs) - 1, np.max(np.diff(idcs))), np.nan, dtype=np.float32)
+
+        for i in range(len(idcs[:-1])):
+            layers[i,:(idcs[i+1] - idcs[i])] = vals[idcs[i]:idcs[i+1]]
+
+        # Find appropriate cut-off of layers using number of observations or hard cut-off
+        if max_layers is None:
+            # Count number of finite observations
+            n_obs = np.sum(np.isfinite(layers), axis = 0)
+            cutoff = np.where(n_obs < min_obs)[0][0]
+
+        else:
+            cutoff = max_layers
+            
+        # Generate None separated xs and ys lists
+        xs = []
+        ys = []
+        for i in range(len(idcs[:-1])):
+            n = min((idcs[i+1] - idcs[i]), cutoff)
+            xs.extend(range(0, n))
+            ys.extend(vals[idcs[i]:(idcs[i] + n)].tolist())
+
+            # None separator - breaks the line between clusters
+            xs.append(None)
+            ys.append(None)
+
+        del idcs, vals
+
+        indivs_trace = go.Scatter(x=xs, y=ys, mode='lines', line=dict(color='rgba(55,138,221,0.2)', width=0.8),
+                                  showlegend=False, hoverinfo='skip', connectgaps=False, # Ensures no bridging across Nones
+                                  visible=(rel_idx == 0)) 
+        
+        # Compute mean line
+        means_x = np.arange(0, cutoff)
+        means_y = np.nanmean(layers[:,:cutoff], axis = 0)
+
+        mean_trace = go.Scatter(x=means_x, y=means_y, mode='lines', line=dict(color='#185FA5', width=2),
+                                showlegend=False, connectgaps=False, visible=(rel_idx == 0))
+
+        return indivs_trace, mean_trace
+
+    # Iterate over frames to plot and update max_counts for histograms
+    for rel_idx in tqdm(rel_frames):
+        # ---FIRST ROW---
+
+        # Histograms (N, area, thetas)
+        for i, param in enumerate(hist_params):
+
+            if param == 'meanThetas':
+                bin_edges = np.linspace(min_x[param], max_x[param], n_bins + 1)
+            else:
+                bin_edges = np.logspace(np.log10(max(min_x[param], 1e-6)), np.log10(max_x[param]), n_bins + 1)
+            counts, _ = np.histogram(data[str(rel_idx)][param], bins = bin_edges)
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+            # Update max_counts
+            if np.max(counts) > max_counts[param]:
+                max_counts[param] = np.max(counts)
+
+            # Add trace
+            fig.add_trace(go.Bar(x=bin_centers, y=counts,                            
+                                 showlegend=False,
+                                 visible=(rel_idx == 0),  # only t = 0 visible initially
+                                 marker_color='steelblue',
+                                 marker_line_width=0), row=1, col=i + 1)
+        
+        # ---(END OF FIRST AND) SECOND ROW---
+
+        for i, x_param in enumerate(scatter_x_params):
+            if type(scatter_y_params[i]) == list:
+                for j in range(2):
+                    fig.add_trace(go.Scatter(x=data[str(rel_idx)][x_param], y=data[str(rel_idx)][scatter_y_params[i][j]], mode='markers', 
+                                             marker=dict(color=['steelblue', 'coral'][j], size=5), showlegend=False, visible=(rel_idx == 0)), scatter_rows[i], scatter_cols[i], bool(j))
+            else:
+                fig.add_trace(go.Scatter(x=data[str(rel_idx)][x_param], y=data[str(rel_idx)][scatter_y_params[i]], mode='markers', 
+                                         marker=dict(color='steelblue', size=5), showlegend=False, visible=(rel_idx == 0)), scatter_rows[i], scatter_cols[i], False)
+                            
+        # ---THIRD ROW---
+
+        # Line plots (pols vs layer (center), pols vs layer (edge), dens vs layer (center), dens vs layer (edge))
+        for i in range(4):
+            idvs_trace, mean_trace = plot_layers(data[str(rel_idx)][layer_params[i]], min_obs, max_layers, rel_idx)
+            fig.add_trace(idvs_trace, 3, i+1)
+            fig.add_trace(mean_trace, 3, i+1)
+        del idvs_trace, mean_trace
+
+        data[str(rel_idx)] = None  # Reduce memory as we go
+        gc.collect()
+
+    # Build slider steps
+    traces_per_frame = len(fig.data) // len(rel_frames)
+    assert len(fig.data) % len(rel_frames) == 0, f"Trace count {len(fig.data)} not divisible by {len(rel_frames)} frames"
+
+    steps = []
+    for i, rel in enumerate(rel_frames):
+        # Create 
+        visible_mask = np.zeros(traces_per_frame * len(rel_frames)).astype(bool)
+
+        start = i * traces_per_frame
+        end = start + traces_per_frame
+        visible_mask[start:end] = True
+
+        steps.append(dict(method='restyle', args=[{'visible':visible_mask.tolist()}],
+                         label=f't={rel:+d}' if rel != 0 else 't=0'))
+        
+    # Update figure
+    fig.update_layout(sliders=[dict(active=round((len(data) - 1)/2), steps=steps,
+                                   currentvalue=dict(prefix='Relative frame: ', font=dict(size=13)),
+                                   pad=dict(t=40, b=10))],
+                      height=900, template='plotly_white', margin=dict(l=50, r=30, t=80, b=80))
+
+    # Histograms
+    for i in range(3):
+        x_scale = ['log', 'log', 'linear'][i]
+        print([np.log10(max(min_x[hist_params[i]], 1e-6)), np.log10(max_x[hist_params[i]])])
+        fig.update_xaxes(title_text = label_dict[hist_params[i]], range = [min_x[hist_params[i]], max_x[hist_params[i]]]
+                                                                           if x_scale == 'linear'
+                                                                           else [np.log10(max(min_x[hist_params[i]], 1e-6)), np.log10(max_x[hist_params[i]])], 
+                         row = 1, col = i + 1, type = x_scale)
+        y_scale = ['log', 'log', 'linear'][i]
+        fig.update_yaxes(title_text = 'Counts', range = [0, max_counts[hist_params[i]]]
+                                                         if y_scale == 'linear'
+                                                         else [0.9, np.log10(max_counts[hist_params[i]])], 
+                         row = 1, col = i + 1, type = y_scale)
+
+    # Scatterplots
+    for i in range(5):
+        x_scale = ['log', 'log', 'log', 'log', 'linear'][i]
+        fig.update_xaxes(title_text = label_dict[scatter_x_params[i]], range = [min_x[scatter_x_params[i]], max_x[scatter_x_params[i]]]
+                                                                                if x_scale == 'linear'
+                                                                                else [np.log10(max(min_x[scatter_x_params[i]], 1e-6)), np.log10(max_x[scatter_x_params[i]])], 
+                         row = scatter_rows[i], col = scatter_cols[i], type = x_scale)
+
+        y_scale = ['log', 'linear', 'linear', 'linear', 'linear'][i]
+        if type(scatter_y_params[i]) == list:
+            for j in range(2):
+                fig.update_yaxes(title_text = label_dict[scatter_y_params[i][j]], range = [min_x[scatter_y_params[i][j]], max_x[scatter_y_params[i][j]]] 
+                                                                                           if y_scale == 'linear' 
+                                                                                           else [np.log10(max(min_x[scatter_y_params[i][j]], 1e-6)), np.log10(max_x[scatter_y_params[i][j]])], 
+                                 row = scatter_rows[i], col = scatter_cols[i], secondary_y = bool(j), type = y_scale)
+        else:
+            fig.update_yaxes(title_text = label_dict[scatter_y_params[i]], range = [min_x[scatter_y_params[i]], max_x[scatter_y_params[i]]] 
+                                                                                    if y_scale == 'linear' 
+                                                                                    else [np.log10(max(min_x[scatter_y_params[i]], 1e-6)), np.log10(max_x[scatter_y_params[i]])], 
+                             row = scatter_rows[i], col = scatter_cols[i], type = y_scale)
+        
+    # Layer plots
+    for i in range(4):
+        fig.update_xaxes(title_text = ['Layer (from center)', 'Layer (from edge)', 'Layer (from center)', 'Layer (from edge)'][i], row = 3, col = i + 1)
+        fig.update_yaxes(title_text = label_dict[layer_params[i]], row = 3, col = i + 1, range = [min_x[layer_params[i]], max_x[layer_params[i]]])
+
+    output_path = '.'.join(input_path.split('.')[:-1]) + '.html'
+    fig.write_html(output_path)
+    print(f'Saved to {output_path}')
+    return fig
+
+def interactive_cluster_merging(input_path: str):
+
+    data = load_cluster_stats_h5(input_path)
+
+    # Collect total clustered individuals and total number of clusters per absolute frame
+    abs_frames = [int(key) for key in data.keys()]
+    n_clustered = []
+    n_clusters = []
+
+    for abs in data.keys():
+        ns = data[abs]['ns']
+        n_clustered.append(np.sum(ns))
+        n_clusters.append(len(ns))
+
+    # Create figure
+    fig = make_subplots(rows=1, cols=2, specs=[[{"secondary_y": True}, {"secondary_y": False}]])
+
+    # Col 1: time series
+    fig.add_trace(go.Scatter(x=abs_frames, y=n_clustered, line=dict(color='steelblue'), name="Clustered individuals"), secondary_y=False, row=1, col=1)
+    fig.add_trace(go.Scatter(x=abs_frames, y=n_clusters, line=dict(color='coral'), name="Clusters"), secondary_y=True, row=1, col=1)
+
+    # Col 2: n_clustered vs n_clusters scatter
+    fig.add_trace(go.Scatter(x=n_clustered, y=n_clusters, mode='markers', marker=dict(color=abs_frames, colorscale='Viridis', colorbar=dict(title='Absolute frame', orientation='h', x=0.72, y=-0.1, xanchor='center', yanchor='top',
+                                                                                                                                            len=0.45, thickness=20), showscale=True), name="Single frame"), secondary_y=False, row=1, col=2)
+
+    # Add range slider to col 1 x-axis only
+    fig.update_layout(xaxis=dict(rangeslider=dict(visible=True), type='linear'),
+                    yaxis=dict(anchor="x", autorange=True, mirror=True, showline=True, side="left", tickmode="auto", ticks="", type="linear", zeroline=False),
+                    yaxis2=dict(anchor="x", autorange=True, mirror=True, showline=True, side="right", tickmode="auto", ticks="", type="linear", zeroline=False))
+
+    # Update labels — use col to target the right axis
+    fig.update_xaxes(title_text='Frame', row=1, col=1)
+    fig.update_xaxes(title_text='Total number of clustered individuals', row=1, col=2)
+    fig.update_yaxes(title_text='Total number of clustered individuals', secondary_y=False, row=1, col=1)
+    fig.update_yaxes(title_text='Total number of clusters', secondary_y=True, row=1, col=1)
+    fig.update_yaxes(title_text='Total number of clusters', row=1, col=2)
+
+    output_path = '.'.join(input_path.split('.')[:-1]) + '_merging.html'
+    fig.write_html(output_path)
+    print(f'Saved to {output_path}')
+    return fig
+
+def interactive_cluster_structure(ds:xr.Dataset, input_path:str, layer_cutoff:int| None = None, fps:int = 5, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1):
+
+    # Load data
+    data = load_cluster_stats_h5(input_path)
+
+    # Define stat names that will be aggregated and initialize storage dictionary
+    stat_names = ['p_by_layer', 'p_from_edge', 'd_by_layer', 'd_from_edge']
+
+    # Store data according to max_layer value and relative frame - first by max_layer, then by stat name
+    stats_by_max_layer:dict[int, dict[str, list]] = {}
+
+    # Iterate over absolute frames
+    for j, key in enumerate(data.keys()):
+
+        # Iterate over stat type
+        for stat in stat_names:
+
+            # Get observations for this absolute frame
+            csr_dict = data[key][stat]
+
+            # Unpack vals and idcs arrays
+            vals = csr_dict['data']
+            idcs = csr_dict['indptr']
+
+            # Add lists to dictionary
+            for i in range(len(idcs) - 1):
+                max_layer = idcs[i+1] - idcs[i]
+                stats_by_max_layer.setdefault(int(max_layer), {}).setdefault(stat, []).append(vals[idcs[i]:idcs[i+1]])
+
+    def plot_layers(stats_by_max_layer:dict[int, dict[str, list]], max_layer:int, stat:str, cutoff:int | None = None):
+
+        # Generate None separated xs and ys lists
+        xs = []
+        ys = []
+        for row in stats_by_max_layer[max_layer][stat]:
+            y = row[:cutoff]
+            xs.extend(range(len(y)))
+            ys.extend(y)
+
+            # None separator - breaks the line between clusters
+            xs.append(None)
+            ys.append(None)
+
+        # Create plotly trace for individual cluster curves
+        indivs_trace = go.Scatter(x=xs, y=ys, mode='lines', line=dict(color="#FFF0B8", width=0.8), showlegend=False, hoverinfo='skip', connectgaps=False, visible=(max_layer == 5))
+
+        # Take median of all cluster curves as a function of layer
+        
+        
+        median_y = np.nanmedian(stats_by_max_layer[max_layer][stat], axis = 0)[:cutoff]
+        median_x = np.arange(len(median_y))
+
+        # Create plotly trace for median curve
+        median_trace = go.Scatter(x=median_x, y=median_y, mode='lines', line=dict(color="#1172D2", width=2), showlegend=False, connectgaps=False, visible=(max_layer == 5))
+
+        return indivs_trace, median_trace, np.nanmax(stats_by_max_layer[max_layer][stat])
     
-    with open(output_dir + "voronoi_sliders/cluster_data.json", "w") as f:
-        json.dump(export_for_plotly(aggregated), f)
+    # Initialize figure and variables to store extrema
+    fig = make_subplots(rows=2, cols=2, horizontal_spacing=0.16, vertical_spacing=0.12)
+    max_x = layer_cutoff if layer_cutoff else np.max(list(stats_by_max_layer.keys()))
+    max_y = {stat: [1, 1, 0, 0] for stat in stat_names}
+    all_max_ds = []
+    
+    # Iterate over unique n values and plot (including adding slider steps)
+    unique_max_layers = np.unique(list(stats_by_max_layer.keys()))
+    steps = []
+    traces_per_frame = 2*len(stat_names) # 2: Individuals, median
+
+    for j, max_layer in enumerate(unique_max_layers):
+
+        # Iterate over different stats
+        for i, stat in enumerate(stat_names):
+
+            # Get traces
+            indivs, median, maxy = plot_layers(stats_by_max_layer, max_layer, stat, layer_cutoff)
+
+            # Update extrema
+            if stat == 'd_by_layer': # Don't need to do it for d_from_edge, since values are the same
+                all_max_ds.append(maxy)
+
+            # Add traces to figure
+            fig.add_trace(indivs, row= (i // 2) + 1, col= (i % 2) +1)
+            fig.add_trace(median, row= (i // 2) + 1, col= (i % 2) +1)
+    
+        # Create a visibility mask
+        visible_mask = np.zeros(traces_per_frame * len(unique_max_layers)).astype(bool)
+        start = j*traces_per_frame
+        end = start + traces_per_frame
+        visible_mask[start:end] = True
+
+        steps.append(dict(method='restyle', args=[{'visible':visible_mask.tolist()}], label=f'l = {max_layer}'))
+
+    # Update maximum density values using quantiles (to exclude outliers)
+    for stat in ['d_by_layer', 'd_from_edge']:
+        max_y[stat] = np.quantile(all_max_ds, 0.9)
+
+    # Update figure
+    fig.update_layout(sliders=[dict(active= 5, steps=steps, currentvalue=dict(prefix='Layer radius: ', font=dict(size=13)), pad=dict(t=40, b=10))], height=900, template='plotly_white', margin=dict(l=50, r=30, t=80, b=80))
+    
+    
+    # Update axes of figure
+    row_labels = ['Median polarization', 'Median density']
+    col_labels = ['Voronoi layer (from center)', 'Voronoi layer (from edge)']
+    for i in range(4):
+        fig.update_xaxes(title_text=col_labels[i%2] if i > 1 else None, range=[0, max_x], row=(i//2)+1, col=(i%2)+1)
+        fig.update_yaxes(title_text=row_labels[i//2] if not (i%2) else None, range=[0, max_y[stat_names[i]]], row=(i//2)+1, col=(i%2)+1)
+
+    # Save figure
+    output_path = '.'.join(input_path.split('.')[:-1]) + '_structure.html'
+    fig.write_html(output_path)
+    print(f'Saved to {output_path}')
+    return fig
+            
+
+
+    
+    # def idk():
+    #     # Load data
+    #     data = load_cluster_stats_h5(input_path)
+
+    #     # Get event frames
+    #     _, abs_event_frames, _, _ = find_reflections(ds, fps, start_frame, end_frame, subsample)
+
+    #     # Find absolute frames in data
+    #     abs_frames = [int(key) for key in data.keys()]
+
+    #     # For each abs_frame, find the nearest event frame and compute offset
+    #     offsets = abs_event_frames[np.argmin(np.abs(abs_frames[:, None] - abs_event_frames[None, :]), axis=1)]
+    #     rel_frames = abs_frames - offsets
+        
+
+
+    

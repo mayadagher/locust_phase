@@ -1,6 +1,5 @@
 '''_____________________________________________________IMPORTS____________________________________________________________'''
 
-import h5py
 # from ultralytics import YOLO
 
 from data_handling import *
@@ -157,17 +156,17 @@ if __name__ == "__main__":
     # plot_density_bin_heatmap(occupancies, plots_path, k_layers, r_max)
 
     # LOOK AT PHASE
+    # px_to_cm = 1/(3.7/50)**2 # Turns density values from /px**2 to /cm**2
+    per_m2 = 1/(3.7/50)**2*(100**2) # Turns density values from /px**2 to /m**2
     # h5_prep = f'/keypoints/20230329_preprocessed_complete_{round(5/subsample, 2)}Hz.hdf5'
     h5_prep = f'/keypoints/20230329_preprocessed_complete_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5'
     ds = load_preprocessed_data(h5_prep)
     # ds = get_local_env(ds, 'metric', 100) # 2 BL
     # ds = get_local_env(ds, 'metric', 200, arena_center, arena_radius) # 4 BL
-    # ds = get_local_env(ds, 'voronoi', None, arena_center, arena_radius)
+    # ds = get_local_env(ds, 'voronoi', None, arena_center, arena_radius, density_factor = per_m2)
     # ds = get_local_env(ds, 'metric', 400) # 8 BL
     # ds = get_local_env(ds, 'metric', 500) # 10 BL
     # save_ds(ds, f'/keypoints/20230329_preprocessed_complete_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5', None)
-    px_to_cm = 1/(3.7/50)**2 # Turns density values into /px**2 to /cm**2
-    px_to_m = 1/(3.7/50)**2*(100**2) # Turns density values into /px**2 to /m**2
     # plot_phase(ds, 'density_metric_100', 'polarization_metric_100', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 2 BL', gridsize = 30, x_factor = px_to_cm)
     # plot_phase(ds, 'density_metric_200', 'polarization_metric_200', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 4 BL', gridsize = 30, x_factor = px_to_cm)
     # plot_phase(ds, 'density_metric_300', 'polarization_metric_300', plots_path, [r'Local density $(/m^2)$', 'Polarization'], 'Locality: 6 BL', gridsize = 30, x_factor = px_to_m)
@@ -238,24 +237,26 @@ if __name__ == "__main__":
     # ax.set_zlabel('Polarization')
     # plt.savefig('vor_3d_scatter_test.png')
     
-    # interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, batch_len = batch_len, batch_idx = batch_idx, start_frame = 0, end_frame = 100, subsample = 1, frame_factor = subsample, cmap = 'viridis')
+    interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 100, subsample = 1, cmap = 'viridis')
+    interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 1000, subsample = 20, cmap = 'viridis')
     
-    # interactive_voronoi_distributions(ds, plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 100, subsample = 1, density_factor = px_to_m)
-    # interactive_voronoi_distributions(ds, plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 1000, subsample = 20, density_factor = px_to_m)
+    # interactive_voronoi_distributions(ds, plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 100, subsample = 1, density_factor = 1)
+    # interactive_voronoi_distributions(ds, plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 1000, subsample = 20, density_factor = 1)
 
     # plot_voronoi_corr_single_frame(ds, param = 'theta', frame_idx = 0, arena_center = arena_center, arena_radius = arena_radius, output_dir = plots_path, param_type = 'circular', title = 'Theta', subsample = 30)
     # compare_corrs_single_frame(ds, param = 'polarization_voronoi_None', frame_idx = 0, arena_center = arena_center, arena_radius = arena_radius, output_dir = plots_path, param_type = 'scalar', title = 'Polarization (4 metric body lengths)', subsample = 1000, metric_n_bins = 50, distance_factor = px_to_m**(-0.5))
     
     # analyse_clusters_single_frame(ds, frame_idx = 0, arena_center = arena_center, arena_radius = arena_radius, output_dir = plots_path, pol_thresh = 0.6, min_cluster_size = 2, area_factor = px_to_m**(-1))
 
-    # define_cycle(ds, output_dir = plots_path)
+    # REFLECTION ANALYSIS
+    # define_cycle(ds, output_dir = plots_path, density_factor = px_to_m)
     # find_reflections(ds, fps = 5)
-    interactive_cluster_analysis(ds, output_dir = plots_path, arena_center= arena_center, arena_radius= arena_radius, fps = 5, start_frame = 0, end_frame = None, subsample = 1,tolerance = 1e-6,
-    pol_thresh = 0.8,
-    min_cluster_size = 2,
-    area_factor = px_to_m**(-1))
-
-
+    # whole_batch_cluster_analysis(ds, output_dir = plots_path, arena_center= arena_center, arena_radius= arena_radius, fps = 5, start_frame = 0, end_frame = None, subsample = 1,tolerance = 1e-6,
+    # pol_thresh = 0.8, min_cluster_size = 2, area_factor = per_m2**(-1), n_workers = 12)
+    # interactive_cluster_analysis('/output/20230329/kp_plots/clusters/cluster_data_start_12094_end_24187_pol_thresh_0.8_min_cluster_size_2.h5', max_layers = 10)
+    # interactive_cluster_merging('/output/20230329/kp_plots/clusters/cluster_data_start_12094_end_24187_subsample_1_pol_thresh_0.8_min_cluster_size_2.h5')
+    # interactive_cluster_structure(ds, input_path = '/output/20230329/kp_plots/clusters/cluster_data_start_12094_end_24187_subsample_1_pol_thresh_0.8_min_cluster_size_2.h5', layer_cutoff = 10)
+    
     # CREATE CSV FILE FOR TREX TRACKING
     # detections_h5_to_trex_csv('/keypoints/20230329_processed_kps.hdf5', '/keypoints/20230329_trex_input.csv', end_frame = 3)
 
@@ -272,6 +273,9 @@ if __name__ == "__main__":
     # ds_save_name = f'/output/preprocessed/{exp_name}/batch_{batch_num}/traj_data' + suffix
     # save_ds(ds, ds_save_name)
     # print('Data saved.')
+
+
+
 
     # LOAD PREPROCESSED DATA
     # ds_load_name = f'/output/preprocessed/{exp_name}/batch_{batch_num}/traj_data' + '.h5'

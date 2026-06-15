@@ -91,22 +91,25 @@ def local_env(pos_valid_t:np.ndarray, thetas_valid_t:np.ndarray, nbr_type:str, n
             vertices = vor.vertices[np.array(reg)[(np.array(reg) != -1).astype(bool)].astype(int)]
             poly = Polygon(clip_voronoi_region(vertices, arena_center, arena_radius, 0.05))
 
-            if poly.is_empty:
+            if poly.is_empty or poly.area < 200: # Area threshold is necessary due to invalid neighbourhoods
                 continue
 
             areas[i] = poly.area
 
         density_valid_t = np.array([len(nbrs) for nbrs in indcs])/areas
-    
+
     else:
         raise ValueError(f"Invalid nbr_type: {nbr_type}. Must be one of 'metric', 'topo', or 'voronoi'.")
 
     # Compute local polarization, EXCLUDING focal individual
     polarizations_valid_t = np.array([calculate_polarization(thetas_valid_t[nbrs]) for nbrs in indcs])
 
+    # Remove individuals whose densities are invalid
+    polarizations_valid_t[np.isnan(density_valid_t)] = np.nan
+
     return density_valid_t, polarizations_valid_t
 
-def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float):
+def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float, density_factor:float = 1):
     '''
     Computes neighbour density and polarization locally.
     
@@ -145,7 +148,7 @@ def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, are
         density_valid_t, polarizations_valid_t = local_env(pos_valid_t, thetas_valid_t, nbr_type, nbr_param, arena_center, arena_radius)
 
         # Update results
-        densities[f, valid_mask[f]] = density_valid_t
+        densities[f, valid_mask[f]] = density_valid_t*density_factor
         polarizations[f, valid_mask[f]] = polarizations_valid_t
     
     # Update ds

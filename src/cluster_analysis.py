@@ -10,31 +10,32 @@ import collections
 from collections import defaultdict
 from scipy.signal import find_peaks
 from dataclasses import dataclass
-from helper_fns import get_frame_slice, clip_voronoi_region
-import time
+from helper_fns import get_frame_slice, clip_voronoi_region, fft_timeseries
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from data_handling import cluster_stats_to_h5
 
 '''_____________________________________________________CLASSES____________________________________________________________'''
 
 class Cluster():
 
-    def __init__(self, ids: np.ndarray[int], poly_list: list[Polygon], density_arr: np.ndarray[float],
+    def __init__(self, ids: np.ndarray[int], centroids: list[np.ndarray], mean_theta: float, theta_arr: np.ndarray[float], area_list: list[float], density_arr: np.ndarray[float],
                  polarization_arr: np.ndarray[float], all_layers: dict[int, dict[int, int]]):
 
         self.ids = ids
-        self.polys = poly_list
+        self.mean_theta = mean_theta
+        self.thetas = theta_arr
+        self.areas = area_list
         self.densities = density_arr
         self.polarizations = polarization_arr
 
         # Store only direct neighbours (layer == 1) for intra-cluster BFS
-        # This is the only thing we need from all_layers going forward
         id_set = set(ids)
-        self.graph: dict[int, set[int]] = {
-            cell_id: {nbr for nbr, dist in all_layers[cell_id].items() if dist == 1 and nbr in id_set}
-            for cell_id in ids
-        }
+        self.graph: dict[int, set[int]] = {cell_id: {nbr for nbr, dist in all_layers[cell_id].items() if dist == 1 and nbr in id_set} for cell_id in ids}
 
         self.centrality = self._compute_centrality()
         self.centroid_id = self.ids[np.argmin(self.centrality)]
+        centroid = centroids[np.argmin(self.centrality)]
+        self.centroid = np.array([centroid.x, centroid.y])
         self.max_layer = int(np.nanmax(self.centroid_distance_array()))
 
     def _bfs_distances(self, source_id: int) -> dict[int, int]:
@@ -88,101 +89,122 @@ class Cluster():
     def density_vs_centrality(self) -> tuple[np.ndarray, np.ndarray]:
         return self.centrality, self.densities
 
-    def shell_means(self, values: np.ndarray) -> dict[int, float]:
+    def shell_medians(self, values: np.ndarray) -> dict[int, float]:
         dist_arr = self.centroid_distance_array()
         shells = {}
         for dist, val in zip(dist_arr, values):
             if np.isnan(dist):
                 continue
             shells.setdefault(int(dist), []).append(val)
-        return {d: np.mean(v) for d, v in sorted(shells.items())}
+        return {d: np.median(v) for d, v in sorted(shells.items())}
 
     def size(self) -> int:
         return len(self.ids)
 
-    def mean_polarization(self) -> float:
-        return float(np.mean(self.polarizations))
+    def median_polarization(self) -> float:
+        return float(np.median(self.polarizations))
+    
+    def var_polarization(self) -> float:
+        return float(np.var(self.polarizations))
 
-    def mean_density(self) -> float:
-        return float(np.mean(self.densities))
+    def median_density(self) -> float:
+        return float(np.median(self.densities))
+    
+    def var_density(self) -> float:
+        return float(np.var(self.densities))
 
     def total_area(self) -> float:
-        return sum(p.area for p in self.polys)
+        return np.sum(self.areas)
+    
+    def theta_var(self) -> float:
+        """
+        Circular variance of an array of angles in radians.
+        Returns a value in [0, 1], where 0 = all angles identical, 1 = maximally dispersed.
+        """
+        return 1 - np.abs(np.mean(np.exp(1j * self.thetas)))
     
 @dataclass
 class FrameClusterStats:
     """All cluster-level statistics for one frame, ready for aggregation."""
-    rel_frame:      int                        # offset from event (negative = before)
     abs_frame:      int
-    # clusters:       list                       # list[Cluster] — raw objects if needed
+    centroids: np.ndarray
     areas:          np.ndarray
     ns:             np.ndarray
-    mean_pols:      np.ndarray
-    mean_densities: np.ndarray
+    median_pols:      np.ndarray
+    var_pols:       np.ndarray
+    median_densities: np.ndarray
+    var_densities:  np.ndarray
+    mean_thetas:    np.ndarray
+    var_thetas:     np.ndarray
     p_by_layer:     np.ndarray                 # (n_clusters, max_layer+1), nan-padded
     d_by_layer:     np.ndarray
     p_from_edge:    np.ndarray                 # flipped version
     d_from_edge:    np.ndarray
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
 
-def find_clusters(all_polarizations:np.ndarray, all_densities:np.ndarray, all_layers:dict[int, dict[int, int]], polys: list[Polygon], pol_thresh:float = 0.8, min_cluster_size:int = 2):
+def find_clusters(all_polarizations: np.ndarray, all_thetas: np.ndarray, all_densities: np.ndarray, all_layers: dict[int, dict[int, int]], polys: list[Polygon],
+                  pol_thresh: float = 0.8, angle_thresh: float = np.pi/4, min_cluster_size: int = 2):
     
-    def add_to_cluster(id:int, all_polarizations:np.ndarray, all_layers:dict[int, dict[int, int]], pol_thresh:float, cluster:list[int], prev_explored:list[int]):
+    def angular_diff(a: float, b: float) -> float:
+        """Smallest angle between two headings, result in [0, π]."""
+        diff = abs(a - b) % (2 * np.pi)
+        return diff if diff <= np.pi else 2 * np.pi - diff
+
+    def add_to_cluster( id: int, cluster_mean_theta: float, cluster: list[int], visited_this_bfs: set[int]) -> tuple[list[int], set[int], float]:
 
         layer_dict = all_layers[id]
-
-        # Find direct neighbours of current id (layer 1)
         nbrs = np.array(list(layer_dict.keys()))[np.array(list(layer_dict.values())) == 1]
 
-        # Find neighbours that belong to the cluster (have a high enough polarization)
-        cluster_nbrs = nbrs[all_polarizations[nbrs] >= pol_thresh]
-        new_cluster_nbrs = [int(i) for i in cluster_nbrs if i not in cluster] # Make sure not to add or explore duplicates
+        # Neighbours must be: polarized, unassigned globally, not yet seen in this BFS
+        candidate_nbrs = [int(i) for i in nbrs if all_polarizations[i] >= pol_thresh and i not in assigned and i not in visited_this_bfs]
 
-        # Add cluster neighbours to list
+        # Among candidates, keep only those aligned with the cluster's current mean heading
+        aligned_nbrs = [i for i in candidate_nbrs if angular_diff(all_thetas[i], cluster_mean_theta) <= angle_thresh]
+
+        new_cluster_nbrs = [i for i in aligned_nbrs if i not in cluster]
         cluster += new_cluster_nbrs
+        visited_this_bfs.update(new_cluster_nbrs)
 
-        # Mark current id as 'explored'
-        prev_explored.append(id)
+        # Update cluster mean heading using circular mean
+        if new_cluster_nbrs:
+            cluster_mean_theta = np.arctan2(np.mean(np.sin(all_thetas[cluster])), np.mean(np.cos(all_thetas[cluster])))
 
-        # Explore cluster neighbours
+        # Continue breadth-first-search for newly added cluster members (recursive)
         for i in new_cluster_nbrs:
-            if i not in prev_explored:
-                cluster, prev_explored = add_to_cluster(i, all_polarizations, all_layers, pol_thresh, cluster, prev_explored)
+            cluster, visited_this_bfs, cluster_mean_theta = add_to_cluster(i, cluster_mean_theta, cluster, visited_this_bfs)
 
-        return cluster, prev_explored
+        return cluster, visited_this_bfs, cluster_mean_theta
 
-    # Define list of previously explored ids
-    prev_explored = []
+    assigned: set[int] = set()   # cells that have been assigned to a completed cluster
     all_clusters = []
+    all_cluster_mean_thetas = []
 
     for id in all_layers.keys():
-        
-        # Exclude ids that are below the polarization threshold or already explored
-        if all_polarizations[id] < pol_thresh or id in prev_explored:
-            if not id in prev_explored:
-                prev_explored.append(id)
+
+        # Skip if below polarization threshold or already in a cluster
+        if all_polarizations[id] < pol_thresh or id in assigned:
             continue
 
-        # Start a new cluster containing this id
         cluster = [id]
+        visited_this_bfs = {id}
+        seed_theta = all_thetas[id] # Theta of first individual used as cluster mean theta until more individuals added
 
-        # Use a recursive function to find all ids in this cluster
-        cluster, prev_explored = add_to_cluster(id, all_polarizations, all_layers, pol_thresh, cluster, prev_explored)
+        cluster, visited_this_bfs, cluster_mean_theta = add_to_cluster(id, seed_theta, cluster, visited_this_bfs)
 
-        # Add cluster to list of all clusters
+        # Only mark cells as assigned once the cluster is complete
+        assigned.update(cluster)
         all_clusters.append(cluster)
+        all_cluster_mean_thetas.append(cluster_mean_theta)
 
-    # Convert clusters of indices into lists of polygons and their polarizations/densities
     final_clusters = []
-    for cluster in all_clusters:
+    for i, cluster in enumerate(all_clusters):
         if len(cluster) >= min_cluster_size:
+            final_clusters.append(Cluster(cluster, [polys[c].centroid for c in cluster], all_cluster_mean_thetas[i], all_thetas[cluster], [polys[c].area for c in cluster], all_densities[cluster], all_polarizations[cluster], all_layers))
 
-            # final_clusters.append(Cluster(cluster, [polys[c] for c in cluster], all_densities[cluster], all_polarizations[cluster], all_layers))
-            final_clusters.append(Cluster([polys[c] for c in cluster], all_densities[cluster], all_polarizations[cluster], all_layers))
-            
+    del polys
     return final_clusters
 
-def clusters_single_frame(vor: Voronoi, valid_indices:np.ndarray, cells: list[Polygon], pol_vals: list[float], density_vals: list[float], tolerance:float = 1e-6, pol_thresh:float = 0.8, min_cluster_size:int = 2):
+def clusters_single_frame(vor: Voronoi, valid_indices:np.ndarray, cells: list[Polygon], pol_vals: list[float], theta_vals: list[float], density_vals: list[float], tolerance:float = 1e-6, pol_thresh:float = 0.8, min_cluster_size:int = 2):
 
     # Get adjacency graph which will be used to construct layers for each individual
     graph = build_adjacency_graph(vor, valid_indices, tolerance)
@@ -192,18 +214,19 @@ def clusters_single_frame(vor: Voronoi, valid_indices:np.ndarray, cells: list[Po
 
     # Get clusters
     pol_vals = np.array(pol_vals)
+    theta_vals = np.array(theta_vals)
     density_vals = np.array(density_vals)
-    return find_clusters(pol_vals, density_vals, all_layers, cells, pol_thresh, min_cluster_size)
+    return find_clusters(pol_vals, theta_vals, density_vals, all_layers, cells, pol_thresh, min_cluster_size)
 
-def extract_frame_cluster_stats(positions:np.ndarray, pol_vals:np.ndarray, density_vals:np.ndarray, theta_vals:np.ndarray, frame_idx: int, rel_frame: int, arena_center: np.ndarray, arena_radius: float, tolerance: float = 1e-6, pol_thresh: float = 0.8,
+def extract_frame_cluster_stats(positions:np.ndarray, pol_vals:np.ndarray, theta_vals:np.ndarray, density_vals:np.ndarray, abs_frame: int, arena_center: np.ndarray, arena_radius: float, tolerance: float = 1e-6, pol_thresh: float = 0.8,
                                 min_cluster_size: int = 2, area_factor: float = 1) -> FrameClusterStats | None:
 
     # Compute voronoi tesselation
     vor = Voronoi(positions)
-    cells, all_pols, all_ds, valid_indices = [], [], [], []
+    cells, all_pols, all_thetas, all_ds, valid_indices = [], [], [], [], []
 
     # Filter out invalid neighbourhoods
-    for point_idx, (p_val, d_val) in enumerate(zip(pol_vals, density_vals)):
+    for point_idx, (p_val, t_val, d_val) in enumerate(zip(pol_vals, theta_vals, density_vals)):
         region_idx = vor.point_region[point_idx]
         region     = vor.regions[region_idx]
 
@@ -218,11 +241,12 @@ def extract_frame_cluster_stats(positions:np.ndarray, pol_vals:np.ndarray, densi
 
         cells.append(poly)
         all_pols.append(p_val)
+        all_thetas.append(t_val)
         all_ds.append(d_val)
         valid_indices.append(point_idx)
 
     # Compute clusters
-    clusters = clusters_single_frame(vor, np.array(valid_indices), cells, all_pols, density_vals, tolerance, pol_thresh, min_cluster_size)
+    clusters = clusters_single_frame(vor, np.array(valid_indices), cells, all_pols, all_thetas, all_ds, tolerance, pol_thresh, min_cluster_size)
 
     del vor
 
@@ -230,13 +254,19 @@ def extract_frame_cluster_stats(positions:np.ndarray, pol_vals:np.ndarray, densi
         return None
 
     # Store cluster results
+    centroids = np.array([c.centroid for c in clusters])
     areas      = np.array([c.total_area() for c in clusters]) * area_factor
     ns         = np.array([c.size() for c in clusters])
-    mean_pols  = np.array([c.mean_polarization() for c in clusters])
-    mean_ds    = np.array([c.mean_density() for c in clusters]) / area_factor
+    med_pols  = np.array([c.median_polarization() for c in clusters])
+    var_pols  = np.array([c.var_polarization() for c in clusters])
+    med_ds    = np.array([c.median_density() for c in clusters])
+    var_ds      = np.array([c.var_density() for c in clusters])
+    mean_thetas = np.array([c.mean_theta for c in clusters])
+    var_thetas = np.array([c.theta_var() for c in clusters])
 
-    pol_layer_dicts = [c.shell_means(c.polarizations) for c in clusters]
-    d_layer_dicts   = [c.shell_means(c.densities) for c in clusters]
+    pol_layer_dicts = [c.shell_medians(c.polarizations) for c in clusters]
+    d_layer_dicts   = [c.shell_medians(c.densities) for c in clusters]
+
     max_layers      = max(c.max_layer for c in clusters)
 
     p_by_layer = np.full((len(clusters), max_layers + 1), np.nan)
@@ -244,7 +274,7 @@ def extract_frame_cluster_stats(positions:np.ndarray, pol_vals:np.ndarray, densi
 
     for i, c in enumerate(clusters):
         p_by_layer[i, :(c.max_layer + 1)] = [pol_layer_dicts[i][j] for j in range(c.max_layer + 1)]
-        d_by_layer[i, :(c.max_layer + 1)] = [d_layer_dicts[i][j] for j in range(c.max_layer + 1)]
+        d_by_layer[i, :(c.max_layer + 1)] = [d_layer_dicts[i][j] / area_factor for j in range(c.max_layer + 1)]
 
     # Flip for edge-relative view
     p_from_edge = np.full_like(p_by_layer, np.nan)
@@ -257,44 +287,20 @@ def extract_frame_cluster_stats(positions:np.ndarray, pol_vals:np.ndarray, densi
         d_from_edge[i, :last] = np.flip(d_by_layer[i, :last])
 
     return FrameClusterStats(
-        rel_frame=rel_frame, abs_frame=frame_idx,
-        clusters=clusters, areas=areas, ns=ns,
-        mean_pols=mean_pols, mean_densities=mean_ds,
-        p_by_layer=p_by_layer, d_by_layer=d_by_layer,
-        p_from_edge=p_from_edge, d_from_edge=d_from_edge,
-    )
+        abs_frame=abs_frame, centroids=centroids,
+        areas=areas, ns=ns, median_pols=med_pols, var_pols=var_pols, median_densities=med_ds, var_densities=var_ds, mean_thetas=mean_thetas, var_thetas=var_thetas,
+        p_by_layer=p_by_layer, d_by_layer=d_by_layer, p_from_edge=p_from_edge, d_from_edge=d_from_edge)
 
 def find_reflections(ds: xr.Dataset, fps:int = 5, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1):
-
-    def fft_timeseries(time_series, sample_rate=1.0):
-        """
-        Returns
-        -------
-        freqs        : array of frequencies (positive only)
-        power        : single-sided power spectrum
-        phase        : phase at each frequency (radians)
-        dominant_freq: frequency with peak power
-        """
-        ts = np.asarray(time_series, dtype=float)
-        ts -= ts.mean()          # remove DC offset
-        n = len(ts)
-
-        fft_vals = np.fft.rfft(ts)
-        freqs    = np.fft.rfftfreq(n, d=1.0 / sample_rate)
-
-        power    = (np.abs(fft_vals) ** 2) * (2.0 / n)   # single-sided, normalised
-        power[0] = 0.0                                     # zero out DC bin
-        phase    = np.angle(fft_vals)
-
-        dominant_freq = freqs[np.argmax(power)]
-
-        return freqs, power, phase, dominant_freq
     
     # Get frames
     abs_frames, ds_idcs = get_frame_slice(ds, start_frame, end_frame, subsample)
 
     # Get median value of polarizations as indicator for reflections (mostly sinusoidal)
     pols = np.nanmedian(ds['polarization_voronoi_None'].values[ds_idcs,:], axis = 1)
+
+    # Get median value of density as indicator for side of reflections (mostly sinusoidal, twice the period, same phase)
+    dens = np.nanmedian(ds['density_voronoi_None'].values[ds_idcs,:], axis = 1)
 
     # Get dominant frequency
     _, _, _, dominant_freq = fft_timeseries(pols, fps)
@@ -309,27 +315,24 @@ def find_reflections(ds: xr.Dataset, fps:int = 5, start_frame:int = 0, end_frame
         prominence=0.1,                  # ignore shallow noise fluctuations
     )
 
-    return trough_frames, abs_frames[trough_frames], period_frames
+    # Classify each reflection as left (density peak) or right (density trough)
+    # by checking whether density is above or below its median at each trough frame
+    dens_median = np.median(dens[trough_frames])
+    sides = np.where(dens[trough_frames] > dens_median, 'left', 'right')
 
-def analyse_reflection_events(
-    ds: xr.Dataset,
-    event_frames: list[int],       # output of your trough-finder
-    half_period: int,              # frames either side of event
-    arena_center: np.ndarray,
-    arena_radius: float,
-    tolerance: float = 1e-6,
-    pol_thresh: float = 0.8,
-    min_cluster_size: int = 2,
-    area_factor: float = 1,                      # forwarded to extract_frame_cluster_stats
-) -> dict[int, list[FrameClusterStats]]:
-    """
-    For each event, collect FrameClusterStats for frames in
-    [event - half_period, event + half_period].
+    return trough_frames, abs_frames[trough_frames], period_frames, sides
 
-    Returns {rel_frame: [FrameClusterStats, ...]} aggregated across all events,
-    where rel_frame=0 is the reflection frame itself.
-    """
-    n_frames = ds.sizes['frame']  # adjust to your ds dimension name
+
+def _frame_worker(args):
+    """Wrapper for using ProcessPoolExecutor."""
+    pos, pols, dens, thetas, abs_frame, arena_center, arena_radius, tolerance, pol_thresh, min_cluster_size, area_factor = args
+    return abs_frame, extract_frame_cluster_stats(pos, pols, thetas, dens, abs_frame, arena_center, arena_radius, tolerance, pol_thresh, min_cluster_size, area_factor)
+
+def whole_batch_cluster_analysis(ds: xr.Dataset, output_dir: str, arena_center:np.ndarray, arena_radius:float, fps:int = 5, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1,tolerance: float = 1e-6,
+    pol_thresh: float = 0.8, min_cluster_size: int = 2, area_factor: float = 1, n_workers:int = 8):
+    
+    # Find absolute and relative (to ds) frame indices
+    abs_frames, rel_frames = get_frame_slice(ds, start_frame, end_frame, subsample)
 
     # Accumulate across events: rel_frame -> list of per-frame stats objects
     aggregated: dict[int, list[FrameClusterStats]] = defaultdict(list)
@@ -341,42 +344,31 @@ def analyse_reflection_events(
     theta_vals = ds['theta'].values # (n_frames, max_n)
 
     # Exclude points that are outside arena or non-finite
-    dist_from_center  = np.linalg.norm(positions - arena_center, axis=0) # (n_frames, max_n)
+    dist_from_center  = np.linalg.norm(positions - arena_center[:, None, None], axis=0) # (n_frames, max_n)
     outside_arena     = dist_from_center > arena_radius # (n_frames, max_n)
-    valid_mask        = (~np.isnan(positions).any(axis=1)) & (~np.isnan(pol_vals)) & (~np.isnan(density_vals)) & (~outside_arena) # (n_frames, max_n)
+    valid_mask        = (~np.isnan(positions).any(axis=0)) & (~np.isnan(pol_vals)) & (~np.isnan(density_vals)) & (~outside_arena) # (n_frames, max_n)
 
-    # Iterate over reflection events
-    for k, event_frame in enumerate(event_frames):
-        print(f'Computing reflection event {k + 1}/{len(event_frames)}.')
+    # Build flat list of arguments for all (event, rel_frame) tasks
+    tasks = []
+    for i, rel_frame in enumerate(rel_frames):
+        mask = valid_mask[rel_frame]
+        tasks.append((positions[:, rel_frame, mask].T, pol_vals[rel_frame, mask], density_vals[rel_frame, mask], theta_vals[rel_frame, mask], abs_frames[i], arena_center, arena_radius, tolerance, pol_thresh, min_cluster_size, area_factor))
 
-        # Iterate over frames around reflection events
-        for rel_frame in tqdm(range(-half_period, half_period + 1), desc="Relative frames"):
-            abs_frame = event_frame + rel_frame
+    # Run in parallel, collect into a plain list to avoid shared-state issues
+    results: list[tuple[int, FrameClusterStats]] = []
 
-            if abs_frame < 0 or abs_frame >= n_frames:
-                continue
-
-            pos = positions[:, rel_frame, valid_mask[rel_frame]]
-            pols = pol_vals[rel_frame, valid_mask[rel_frame]]
-            dens = density_vals[rel_frame, valid_mask[rel_frame]]
-            thetas = theta_vals[rel_frame, valid_mask[rel_frame]]
-
-            stats = extract_frame_cluster_stats(pos, pols, dens, thetas, abs_frame, rel_frame, arena_center, arena_radius, tolerance, pol_thresh, min_cluster_size, area_factor)
-
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_frame_worker, task): task for task in tasks}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Frames"):
+            abs_frame, stats = future.result()
             if stats is not None:
-                aggregated[rel_frame].append(stats)
+                results.append((abs_frame, stats))
 
-    return aggregated
+    # Merge into aggregated dict on the main process — no race conditions
+    aggregated: dict[int, list[FrameClusterStats]] = defaultdict(list)
+    for abs_frame, stats in results:
+        aggregated[abs_frame].append(stats)
 
-
-
-# all_densities = np.arange(8)
-# all_polarizations = np.array([0.9,0.85, 0.7, 0.6, 0.9, 0.6, 0.7, 0.95]) # 8 ids
-# all_layers = {0: {0:0, 1:1, 2:1, 3:2, 4:2, 5:3, 6:4, 7:4}, 1: {0:1, 1:0, 2:1, 3:2, 4:2, 5:3, 6:4, 7:4}, 
-#               2: {0:1, 1:1, 2:0, 3:1, 4:1, 5:2, 6:3, 7:3}, 3: {0:2, 1:2, 2:1, 3:0, 4:1, 5:2, 6:3, 7:3},
-#               4: {0:2, 1:2, 2:1, 3:1, 4:0, 5:1, 6:2, 7:2}, 5: {0:3, 1:3, 2:2, 3:2, 4:1, 5:0, 6:1, 7:1},
-#               6: {0:4, 1:4, 2:3, 3:3, 4:2, 5:1, 6:0, 7:1}, 7: {0:4, 1:4, 2:3, 3:3, 4:2, 5:1, 6:1, 7:0},
-#               }
-# polys = [1, 2, 3, 4, 5, 6, 7, 8]
-# pol_thresh = 0.8
-# find_clusters(all_polarizations, all_densities, all_layers, polys, pol_thresh)
+    # Save data to .h5 file
+    output_file = output_dir + f"clusters/cluster_data_start_{abs_frames[0]}_end_{abs_frames[-1]}_subsample_{subsample}_pol_thresh_{pol_thresh}_min_cluster_size_{min_cluster_size}.h5"
+    cluster_stats_to_h5(aggregated, output_file)
