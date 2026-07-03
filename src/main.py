@@ -160,7 +160,7 @@ if __name__ == "__main__":
     per_m2 = 1/(3.7/50)**2*(100**2) # Turns density values from /px**2 to /m**2
     # h5_prep = f'/keypoints/20230329_preprocessed_complete_{round(5/subsample, 2)}Hz.hdf5'
     h5_prep = f'/keypoints/20230329_preprocessed_complete_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5'
-    ds = load_preprocessed_data(h5_prep)
+    # ds = load_preprocessed_data(h5_prep)
     # ds = get_local_env(ds, 'metric', 100) # 2 BL
     # ds = get_local_env(ds, 'metric', 200, arena_center, arena_radius) # 4 BL
     # ds = get_local_env(ds, 'voronoi', None, arena_center, arena_radius, density_factor = per_m2)
@@ -237,8 +237,8 @@ if __name__ == "__main__":
     # ax.set_zlabel('Polarization')
     # plt.savefig('vor_3d_scatter_test.png')
     
-    interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 100, subsample = 1, cmap = 'viridis')
-    interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 1000, subsample = 20, cmap = 'viridis')
+    # interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 100, subsample = 1, cmap = 'viridis')
+    # interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 1000, subsample = 20, cmap = 'viridis')
     
     # interactive_voronoi_distributions(ds, plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 100, subsample = 1, density_factor = 1)
     # interactive_voronoi_distributions(ds, plots_path, arena_center, arena_radius, start_frame = 0, end_frame = 1000, subsample = 20, density_factor = 1)
@@ -268,6 +268,12 @@ if __name__ == "__main__":
     # # PREPROCESS DATA
     # ds = preprocess_raw(ds_raw, speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=True, radius=960) # Center only to exclude stray detections near borders
     # print('Data pre-processed.')
+    # speed_dict_reduced = {'raw': None, 'spline': {'degree': 2, 's': 0.5}}
+    # reduced_ds('/output/20230329/bb_plots/preprocessed_h5s/batch_7/traj_data_reduced.h5', exp_name, 7, speed_dict_reduced, fill_gaps, interp_dict, center_only = True, radius = 960)
+    # reduced_ds('/output/20230329/bb_plots/preprocessed_h5s/batch_8/traj_data_reduced.h5', exp_name, 8, speed_dict_reduced, fill_gaps, interp_dict, center_only = True, radius = 960)
+    # reduced_ds('/output/20230329/bb_plots/preprocessed_h5s/batch_9/traj_data_reduced.h5', exp_name, 9, speed_dict_reduced, fill_gaps, interp_dict, center_only = True, radius = 960)
+    # ds = load_preprocessed_data('/output/20230329/bb_plots/preprocessed_h5s/batch_1/traj_data.h5')
+    # print(np.min(ds['frame']), np.max(ds['frame']))
 
     # # SAVE PREPROCESSED DATA
     # ds_save_name = f'/output/preprocessed/{exp_name}/batch_{batch_num}/traj_data' + suffix
@@ -278,10 +284,10 @@ if __name__ == "__main__":
 
 
     # LOAD PREPROCESSED DATA
-    # ds_load_name = f'/output/preprocessed/{exp_name}/batch_{batch_num}/traj_data' + '.h5'
+    # ds_load_name = f'/output/{exp_name}/bb_plots/preprocessed_h5s/batch_{batch_num}/traj_data.h5'
     # ds = load_preprocessed_data(ds_load_name)
     # print('Pre-processed data loaded.')
-    # print(ds.data_vars)
+    # print(ds.data_vars)   
     # print(ds.isel(id=0, frame=slice(0, 300))['x_raw'])
     # print(ds.isel(id=0, frame=slice(0, 300))['x_butter'])
 
@@ -315,7 +321,7 @@ if __name__ == "__main__":
 
     # PLOT SMOOTHED COORDINATES
 
-    # plot_smoothed_coords(ds, id = 0, speed_names = ['high_ord', 'butter', 'spline'], t_slice = slice(0, 300), exp_name = exp_name, batch_num = batch_num)
+    # plot_smoothed_coords(ds, output_dir = f'/output/{exp_name}/bb_plots/batch_{batch_num}/preprocess/', id = 0, smooth_names = ['high_ord', 'butter', 'spline'], start_frame = 0, end_frame = 300)
     # print('Plotted smoothed coordinates.')
 
     # PLOT CORRELATION BETWEEN SPEED AND TRACKLET LENGTH

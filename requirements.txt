@@ -27,3 +27,4 @@ torchvision
 imageio[ffmpeg]
 plotly
 shapely
+scikit-image

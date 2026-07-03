@@ -22,8 +22,8 @@ def get_frame_slice(ds:xr.Dataset, rel_start:int = 0, rel_end:int | None = None,
     indcs = np.arange(rel_start, rel_end, in_function_subsample)
 
     # Finalize splices
-    abs_frames = ds_frames[indcs]
-    ds_indcs = indcs
+    abs_frames = ds_frames[indcs].astype(int)
+    ds_indcs = indcs.astype(int)
 
     return abs_frames, ds_indcs
 

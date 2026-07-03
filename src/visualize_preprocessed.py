@@ -28,17 +28,25 @@ def plot_tracks(ds, output_dir: str, ids: np.array, start_frame:int = 0, end_fra
 
 def plot_smoothed_coords(ds, output_dir: str, id: int, smooth_names: list[str], start_frame: int = 0, end_frame: int | None = None): # Takes preprocessed xarray.Dataset as input that has raw and sg computed
     
-    frames = get_frame_slice(ds, start_frame, end_frame)
+    _, rel_frames = get_frame_slice(ds, start_frame, end_frame)
 
     # Look at raw versus smooth x and y data for a single id
     coords = ['x', 'y', 'v']
     _, axs = plt.subplots(len(coords), len(smooth_names), figsize = (8, 10), sharex = True)
     
-    for i, name in enumerate(smooth_names):
-        for j, coord in enumerate(coords):
+    for j, coord in enumerate(coords):
+        
+        # Load raw values
+        raw = ds[coord + '_raw'].to_numpy()[id, rel_frames]
+         
+        for i, name in enumerate(smooth_names):
+        
+            # Load smoothed values
+            smoothed = ds[coord + '_' + name].to_numpy()[id, rel_frames]
+
             if len(smooth_names) > 1:
-                axs[j][i].plot(ds['frame'].isel(frame=frames), ds[coord + '_raw'].isel(id=id, frame=frames), label = 'Original')
-                axs[j][i].plot(ds['frame'].isel(frame=frames), ds[coord + '_' + name].isel(id=id, frame=frames), label = 'Smoothed', linestyle = '--')
+                axs[j][i].plot(rel_frames, raw, label = 'Original')
+                axs[j][i].plot(rel_frames, smoothed, label = 'Smoothed', linestyle = '--')
                 if j == len(coords) - 1:
                     axs[j][i].set_xlabel('Frame', fontsize = 17)
                 if i == 0:
@@ -46,23 +54,22 @@ def plot_smoothed_coords(ds, output_dir: str, id: int, smooth_names: list[str], 
                 if j == 0:
                     axs[j][i].set_title(name, fontsize = 17)
             else:
-                if coord == 'v':
-                    ds['v'] = ds['velocity']
-                axs[j].plot(ds['frame'].isel(frame=frames), ds[coord].isel(id=id, frame=frames), label = 'Original')
-                axs[j].plot(ds['frame'].isel(frame=frames), ds[coord + '_' + name].isel(id=id, frame=frames), label = 'Smoothed', linestyle = '--')
+                axs[j].plot(rel_frames, raw, label = 'Original')
+                axs[j].plot(rel_frames, smoothed, label = 'Smoothed', linestyle = '--')
                 if j == len(coords) - 1:
                     axs[j].set_xlabel('Frame', fontsize = 17)
                 if i == 0:
                     axs[j].set_ylabel(coord, fontsize = 17)
                 if j == 0:
                     axs[j].set_title(name, fontsize = 17)
+
     if len(smooth_names) > 1:
         axs[-1][-1].legend()
     else:
         axs[-1].legend()
 
     plt.tight_layout()
-    plt.savefig(output_dir + f'smoothed_speeds_{smooth_names}.png')
+    plt.savefig(output_dir + f'smoothed_speeds.png')
 
 def plot_speed_hists(ds, output_dir: str, smooth_names: list): # Takes preprocessed xarray.Dataset as input
 

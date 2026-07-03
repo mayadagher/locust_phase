@@ -21,7 +21,7 @@ def load_trex_data(batch_num:int, file_name:str, load_num_ids:int | None = None)
 
     assert load_num_ids is None or load_num_ids > 0, "load_num_ids must be a positive integer."
 
-    data_dir = f'/data/batch_{batch_num}/data/'
+    data_dir = f'/bb/trex_outputs/batch_{batch_num}/data/'
     num_ids = len(os.listdir(data_dir))
     ids = np.arange(num_ids) if load_num_ids is None else np.arange(load_num_ids)
 

@@ -320,14 +320,14 @@ def preprocess_raw(ds, speed_dict, fill_gaps = False, interp_dict = None, center
     print('Time to compute tracklet lengths and IDs:', round(t5 - t4, 3))
 
     # Compute orientations and angular speed
-    ds = compute_theta(ds, speed_dict)
-    t6 = time.time()
-    print('Time to compute orientations and angular speed:', round(t6 - t5, 3))
+    # ds = compute_theta(ds, speed_dict)
+    # t6 = time.time()
+    # print('Time to compute orientations and angular speed:', round(t6 - t5, 3))
 
     # Compute distance from center
-    ds = compute_dist_from_center(ds)
-    t7 = time.time()
-    print('Time to compute distance from center:', round(t7 - t6, 3))
+    # ds = compute_dist_from_center(ds)
+    # t7 = time.time()
+    # print('Time to compute distance from center:', round(t7 - t6, 3))
     return ds
 
 def load_and_preprocess(batch_num:int, exp_name:str, speed_dict:dict, fill_gaps:bool, interp_dict:dict, center_only:bool, radius:int, load_num_ids:int = None):
@@ -367,3 +367,31 @@ def preprocess_save_all_batches(exp_name:str, num_batches:int, speed_dict:dict, 
             del ds
 
 # Try to isolate discontinuities by looking at angular speed (to make sure tracklets are actually just one individual)
+
+def reduced_ds(output_path:str, exp_name:str, batch_num:int, speed_dict:dict, fill_gaps:bool, interp_dict:dict, center_only:bool, radius:int):
+    '''Return minimally preprocessed dataset included x, y, vx, and vy for a subset of smoothing methods.'''
+
+    print(f'Minimally preprocessing data for batch {batch_num}.')
+
+    # Do full preprocess
+    ds, _ = load_and_preprocess(batch_num, exp_name, speed_dict, fill_gaps, interp_dict, center_only, radius)
+
+    # Remove unnecessary data variables
+    vars = []
+    for smooth in speed_dict.keys():
+        if smooth != 'raw':
+            vars.extend([f'x_{smooth}', f'y_{smooth}'])
+    ds = ds[vars]
+
+    # Get vx, vy from simple differentiation
+    for smooth in speed_dict.keys():
+        if smooth != 'raw':
+            ds[f'vx_{smooth}'] = ds[f'x_{smooth}'].diff(dim='frame')
+            ds[f'vy_{smooth}'] = ds[f'y_{smooth}'].diff(dim='frame')
+
+    # SAVE DATA
+    params = {'speed_dict': speed_dict, 'fill_gaps': fill_gaps, 'interp_dict': interp_dict, 'center_only': center_only, 'radius': radius}
+    save_ds(ds, output_path, params)
+    print(f'Data for batch {batch_num} saved.\n')
+
+    del ds
