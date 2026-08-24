@@ -10,8 +10,13 @@
     "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/bb/,target=/bb,type=bind,readonly",
     "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/keypoints/,target=/keypoints,type=bind",
     "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/mocap/,target=/mocap,type=bind",
-    "source=/Users/mayadagher/Documents/Locusts/hangar/original/,target=/original,type=bind"
+    "source=/Users/mayadagher/Documents/Locusts/hangar/original/,target=/original,type=bind",
+    "source=/Users/mayadagher/Documents/Locusts/hangar/intrinsic_calibration/,target=/intrinsics,type=bind"
   ],
+  "containerEnv": {
+    "PYTHONPATH": "/calibration_src:/workspaces/project/src"
+  },
+  
   "customizations": {
     "vscode": {
       "settings": {

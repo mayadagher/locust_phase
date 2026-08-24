@@ -110,14 +110,14 @@ if __name__ == "__main__":
     # unprocessed_stats(h5_in = '/keypoints/20230329_unprocessed_complete.hdf5', subsample = 10, n_bins = 100, output_dir = plots_path)
 
     # ANIMATE KEYPOINTS
-    # ds_kp = detections_h5_to_kp_xr(h5_kp)
+    # ds_kp = kp_detections_to_xr(h5_kp)
     # GET KEYPOINTS FOR WHOLE VIDEO
     # animate_zoom_out(ds_kp, img_dir, plots_path, start_frame = 0, end_frame = 150)
 
     # COMPUTE ENTROPY
     subsample = 1
     batch_idx = 1
-    # ds = detections_h5_to_xr_dataset(h5_kp, start_frame = batch_idx*batch_len, end_frame = (batch_idx+1)*batch_len, subsample = subsample)
+    # ds = kp_detections_to_xr(h5_kp, start_frame = batch_idx*batch_len, end_frame = (batch_idx+1)*batch_len, subsample = subsample)
     # print('Keypoints loaded into xarray dataset.')
     # occupancies, k_layers = compute_occupancy_fixed_dr(ds, n_layers, n_ang0, r_max, n_focals, rotation_null = False, shuffle_null = False)
     # occ_da = xr.DataArray(

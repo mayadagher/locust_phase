@@ -8,5 +8,11 @@ __pycache__/
 *.png
 *.jpg
 
+# Ignore .pkl files
+*.pkl
+
+# Ignore .html files
+*.html
+
 # Ignore plots
 plots/

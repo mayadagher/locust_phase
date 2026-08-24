@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from tqdm import tqdm
 import csv
-
+from dewarping import dewarp_pts
 '''_____________________________________________________LOAD AND SAVE FUNCTIONS____________________________________________________________'''
 def load_trex_data(batch_num:int, file_name:str, load_num_ids:int | None = None):
     """
@@ -67,9 +67,10 @@ def save_ds(ds:xr.Dataset, save_name:str, params:dict | None): # Save pre-proces
     encoding = {var: {'compression': 'gzip', 'compression_opts': 4} for var in ds.data_vars}
     ds.to_netcdf(save_name, engine="h5netcdf", encoding=encoding)
 
-
     params_out = Path(save_name.split('.')[0] + '_params')
     params_out.with_suffix(".json").write_text(json.dumps(params, indent=2, sort_keys=True))
+
+    print('Saved dataset to', save_name)
 
 def save_neighbours_hdf5(h5_path: str, interaction: str, param, values: list, offsets: list, data_name: str, compression="gzip"):
     """
@@ -230,77 +231,125 @@ def detections_h5_to_trex_csv(h5_path:str, csv_path:str, start_frame:int = 0, en
 
                 writer.writerow([x, y, f_idx])
 
-def detections_h5_to_xr_dataset(h5_path:str, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, rescale_factor:float = 1):
+def kp_detections_to_xr(h5_path:str, calibration_path:str | None = None, frame_width:int = 7000, frame_height:int = 7000, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, rescale_factor:float = 1, keep_kps:bool = False):
+    """
+    Convert keypoint detections from HDF5 to xarray Dataset. De-warp detections using calibration bundle. Rescale coordinates if needed (from downsampled image, etc.).
+    """
 
+    if end_frame is None:
+        with h5py.File(h5_path, 'r') as f:
+            end_frame = len(f.keys())
+
+    datasets = []
     with h5py.File(h5_path, 'r') as f:
-        end_frame = min(end_frame, len(f.keys())) if end_frame is not None else len(f.keys())
-        datasets = []
-        max_detections = 0
         for f_idx in tqdm(range(start_frame, end_frame, subsample)):
+
+            # Get centroids, heads, tails from HDF5
             centroids = f[f'f{f_idx}']['centroid']
             heads = f[f'f{f_idx}']['head']
             tails = f[f'f{f_idx}']['tail']
-            # conf_head_tail = f[f'f{f_idx}']['conf']
 
             ds = xr.Dataset(
                 {
-                    'centroid_x': (['id'], centroids[:, 0]*rescale_factor), # Rescale if necessary to match original image dimensions (e.g. if detections were made on downsampled images)
+                    'centroid_x': (['id'], centroids[:, 0]*rescale_factor),
                     'centroid_y': (['id'], centroids[:, 1]*rescale_factor),
-                    'theta': (['id'], np.arctan2(heads[:, 1] - tails[:, 1], heads[:, 0] - tails[:, 0])), # Orientation calculated from head and tail positions
-
-                    # Potentially useful but not currently used variables - can be added back in if needed for tracking or other analyses
-                    # 'head_x': (['id'], heads[:, 0]),
-                    # 'head_y': (['id'], heads[:, 1]),
-                    # 'tail_x': (['id'], tails[:, 0]),
-                    # 'tail_y': (['id'], tails[:, 1]),
-                    # 'conf_head': (['id'], conf_head_tail[:, 0]),
-                    # 'conf_tail': (['id'], conf_head_tail[:, 1]),
-                },
-                coords={'id': np.arange(len(centroids)), 'frame': f_idx},
-            )
-            datasets.append(ds)
-            if len(centroids) > max_detections:
-                max_detections = len(centroids)
-
-    full_ds = xr.concat(datasets, dim='frame', join='outer')
-    
-    return full_ds
-
-def detections_h5_to_kp_xr(h5_path:str, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, rescale_factor:float = 1):
-
-    with h5py.File(h5_path, 'r') as f:
-        end_frame = min(end_frame, len(f.keys())) if end_frame is not None else len(f.keys())
-        datasets = []
-        max_detections = 0
-        for f_idx in tqdm(range(start_frame, end_frame, subsample)):
-            centroids = f[f'f{f_idx}']['centroid']
-            heads = f[f'f{f_idx}']['head']
-            tails = f[f'f{f_idx}']['tail']
-            # conf_head_tail = f[f'f{f_idx}']['conf']
-
-            ds = xr.Dataset(
-                {
-                    'centroid_x': (['id'], centroids[:, 0]*rescale_factor), # Rescale if necessary to match original image dimensions (e.g. if detections were made on downsampled images)
-                    'centroid_y': (['id'], centroids[:, 1]*rescale_factor),
-                    'theta': (['id'], np.arctan2(heads[:, 1] - tails[:, 1], heads[:, 0] - tails[:, 0])), # Orientation calculated from head and tail positions
-
-                    # Potentially useful but not currently used variables - can be added back in if needed for tracking or other analyses
                     'head_x': (['id'], heads[:, 0]),
                     'head_y': (['id'], heads[:, 1]),
                     'tail_x': (['id'], tails[:, 0]),
                     'tail_y': (['id'], tails[:, 1]),
-                    # 'conf_head': (['id'], conf_head_tail[:, 0]),
-                    # 'conf_tail': (['id'], conf_head_tail[:, 1]),
                 },
                 coords={'id': np.arange(len(centroids)), 'frame': f_idx},
             )
+
             datasets.append(ds)
-            if len(centroids) > max_detections:
-                max_detections = len(centroids)
 
     full_ds = xr.concat(datasets, dim='frame', join='outer')
-    
+
+    # Reshape data in order to de-warp all points at once (for efficiency) and compute theta.
+    # Flatten in the same order for x and y so each pair stays associated with the same detection.
+    centroids = np.column_stack([full_ds['centroid_x'].values.ravel(), full_ds['centroid_y'].values.ravel()])
+    heads = np.column_stack([full_ds['head_x'].values.ravel(), full_ds['head_y'].values.ravel()])
+    tails = np.column_stack([full_ds['tail_x'].values.ravel(), full_ds['tail_y'].values.ravel()])
+
+    if calibration_path is not None:
+
+        # De-warp data
+        centroids = dewarp_pts(centroids, calibration_path, frame_width, frame_height)
+        heads = dewarp_pts(heads, calibration_path, frame_width, frame_height)
+        tails = dewarp_pts(tails, calibration_path, frame_width, frame_height)
+
+        # Correct data
+        full_ds['centroid_x'] = (('frame', 'id'), centroids[:, 0].reshape(full_ds['centroid_x'].shape))
+        full_ds['centroid_y'] = (('frame', 'id'), centroids[:, 1].reshape(full_ds['centroid_y'].shape))
+        full_ds['head_x'] = (('frame', 'id'), heads[:, 0].reshape(full_ds['head_x'].shape))
+        full_ds['head_y'] = (('frame', 'id'), heads[:, 1].reshape(full_ds['head_y'].shape))
+        full_ds['tail_x'] = (('frame', 'id'), tails[:, 0].reshape(full_ds['tail_x'].shape))
+        full_ds['tail_y'] = (('frame', 'id'), tails[:, 1].reshape(full_ds['tail_y'].shape))
+
+    # Compute theta (orientation) from dewarped head and tail positions
+    theta = np.arctan2(heads[:, 1] - tails[:, 1], heads[:, 0] - tails[:, 0])
+    theta = theta.reshape(full_ds['centroid_x'].shape)
+    full_ds['theta'] = (('frame', 'id'), theta)
+
+    # Drop unnecessary variables
+    if not keep_kps:
+        full_ds = full_ds.drop_vars(['head_x', 'head_y', 'tail_x', 'tail_y'])
+
     return full_ds
+
+# def kp_detections_to_xr(h5_path:str, calibration_path:str, frame_width:int = 7000, frame_height:int = 7000,start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, rescale_factor:float = 1, keep_kps:bool = False):
+#     """
+#     Convert keypoint detections from HDF5 to xarray Dataset. De-warp detections using calibration bundle. Rescale coordinates if needed (from downsampled image, etc.).
+#     """
+
+#     if end_frame is None:
+#         with h5py.File(h5_path, 'r') as f:
+#             end_frame = len(f.keys())
+
+#     datasets = []
+#     with h5py.File(h5_path, 'r') as f:
+#         for f_idx in tqdm(range(start_frame, end_frame, subsample)):
+
+#             # Get centroids, heads, tails from HDF5
+#             centroids = f[f'f{f_idx}']['centroid']
+#             heads = f[f'f{f_idx}']['head']
+#             tails = f[f'f{f_idx}']['tail']
+
+#             # Transform points from image coordinates to arena coordinates using calibration bundle
+#             centroids = dewarp(centroids, calibration_path, frame_width, frame_height)
+#             heads = dewarp(heads, calibration_path, frame_width, frame_height)
+#             tails = dewarp(tails, calibration_path, frame_width, frame_height)
+
+#             # Compute theta (orientation) from head and tail positions
+#             theta = np.arctan2(heads[:, 1] - tails[:, 1], heads[:, 0] - tails[:, 0])
+
+#             if keep_kps:
+#                 ds = xr.Dataset(
+#                     {
+#                         'centroid_x': (['id'], centroids[:, 0]*rescale_factor),
+#                         'centroid_y': (['id'], centroids[:, 1]*rescale_factor),
+#                         'theta': (['id'], theta),
+#                         'head_x': (['id'], heads[:, 0]),
+#                         'head_y': (['id'], heads[:, 1]),
+#                         'tail_x': (['id'], tails[:, 0]),
+#                         'tail_y': (['id'], tails[:, 1]),
+#                     },
+#                     coords={'id': np.arange(len(centroids)), 'frame': f_idx},
+#                 )
+#             else:
+#                 ds = xr.Dataset(
+#                     {
+#                         'centroid_x': (['id'], centroids[:, 0]*rescale_factor),
+#                         'centroid_y': (['id'], centroids[:, 1]*rescale_factor),
+#                         'theta': (['id'], theta),
+#                     },
+#                     coords={'id': np.arange(len(centroids)), 'frame': f_idx},
+#                 )
+#             datasets.append(ds)
+
+#     full_ds = xr.concat(datasets, dim='frame', join='outer')
+    
+#     return full_ds
 
 def cluster_stats_to_h5(aggregated: dict[int, list], output_path: str):
     """

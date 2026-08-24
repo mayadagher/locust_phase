@@ -1,10 +1,9 @@
 '''_____________________________________________________IMPORTS____________________________________________________________'''
 
-
 import numpy as np
 import xarray as xr
 from scipy.spatial import cKDTree
-from shapely.geometry import Polygon, Point
+
 
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
 

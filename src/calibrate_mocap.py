@@ -8,7 +8,7 @@ import pandas as pd
 from image_analysis import load_image_sequence
 from scipy.spatial.distance import pdist
 from scipy.optimize import least_squares
-from scipy.ndimage import binary_dilation, gaussian_filter, label
+from scipy.ndimage import binary_dilation, label
 from skimage import measure
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -18,41 +18,9 @@ from scipy.spatial import cKDTree
 from helper_fns import fft_timeseries
 from data_handling import load_preprocessed_data
 from tqdm import tqdm
+from dewarping import dewarp_img
+
 '''_____________________________________________________FUNCTIONS____________________________________________________________'''
-
-def calibrate_camera(vid_folder:str, plot:bool = False):
-
-    # CHECKERBOARD = (7, 5)
-    # VIDEO = "calibration.mp4"
-    # SAMPLE_EVERY_N_FRAMES = 30   # grab one frame per second at 30fps
-
-    # objp = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
-    # objp[:, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
-
-    # obj_points, img_points = [], []
-    # cap = cv2.VideoCapture(VIDEO)
-    # frame_idx = 0
-
-    # while True:
-    #     ret, frame = cap.read()
-    #     if not ret:
-    #         break
-    #     if frame_idx % SAMPLE_EVERY_N_FRAMES == 0:
-    #         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    #         found, corners = cv2.findChessboardCorners(gray, CHECKERBOARD)
-    #         if found:
-    #             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-    #             corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
-    #             obj_points.append(objp)
-    #             img_points.append(corners)
-    #             print(f"Frame {frame_idx}: corners found ({len(obj_points)} total)")
-    #     frame_idx += 1
-
-    # cap.release()
-    # print(f"Calibrating with {len(obj_points)} frames...")
-    # ret, K, dist, _, _ = cv2.calibrateCamera(obj_points, img_points, gray.shape[::-1], None, None)
-    # np.savez("calibration.npz", K=K, dist=dist)   # save for later use
-        pass
 
 def fit_circle_to_binary_heatmap(binary_map: np.ndarray):
     """
@@ -145,7 +113,7 @@ def find_regions_of_interest_mocap(binary_map: np.ndarray, x_edges: np.ndarray, 
 
     return regions, np.array([cx_world, cy_world]), r_world
 
-def is_square_corners(pts:np.ndarray, tol:float, max_side_length:float = np.inf) -> bool:
+def is_square_corners(pts:np.ndarray, square_tol:float, diag_tol:float = 0.3, max_side_length:float = np.inf) -> bool:
     '''Checks whether 3 or 4 input points form corners of a square (two equal sides, correct diagonal).
     max_side_length defines the maximum allowable side length of the square.'''
     
@@ -159,14 +127,14 @@ def is_square_corners(pts:np.ndarray, tol:float, max_side_length:float = np.inf)
 
     # Check if first n distances are equal (shortest distances)
     sides_idx = 2*(n//2)
-    sides_equal = np.sum((d[:sides_idx] - d[:sides_idx,np.newaxis]) < tol) == sides_idx**2
+    sides_equal = np.sum(np.abs(d[:sides_idx] - d[:sides_idx,np.newaxis]) < square_tol) == sides_idx**2
 
     if d[:sides_idx].mean() > max_side_length:
         return False
     
     # Check if last distances are proper diagonals
-    diags_ok = np.sum((d[sides_idx:] - np.sqrt(2)*d[:sides_idx].mean()) < tol) == n//2
-    # print(sides_equal, diags_ok)
+    diags_ok = np.sum(np.abs(d[sides_idx:] - np.sqrt(2)*d[:sides_idx].mean()) < diag_tol) == n//2
+
     return sides_equal and diags_ok
 
 def sort_pts(pts):
@@ -175,7 +143,7 @@ def sort_pts(pts):
     idx = np.lexsort((pts[:, 1], pts[:, 0]))
     return pts[idx]
 
-def validate_region_of_interest_mocap(df: pd.DataFrame, regions: list[dict], mocap_arena_center:np.ndarray[float], mocap_arena_r:float, square_side_tolerance: float = 0.15):
+def validate_region_of_interest_mocap(df: pd.DataFrame, regions: list[dict], mocap_arena_center:np.ndarray[float], mocap_arena_r:float, square_tol:float = 5, diag_tol:float = 0.3, max_side_length:float = np.inf):
     '''Uses single MoCap file and regions of interest to determine which regions contain the calibration block.'''
 
     # Score each region over all frames (one point for every frame in which there are exactly 3 points in a square-ish formation) and collect these points
@@ -189,7 +157,7 @@ def validate_region_of_interest_mocap(df: pd.DataFrame, regions: list[dict], moc
             in_region = ((frame_df['x'] >= x_min) & (frame_df['x'] <= x_max) & (frame_df['y'] >= y_min) & (frame_df['y'] <= y_max))
             pts = frame_df.loc[in_region, ['x', 'y', 'z']].values
 
-            if len(pts) == 3 and is_square_corners(pts[:,:2], square_side_tolerance):
+            if len(pts) == 3 and is_square_corners(pts[:,:2], square_tol, diag_tol, max_side_length):
                 region_scores[r_idx] += 1
 
                 # Store points
@@ -216,29 +184,76 @@ def validate_region_of_interest_mocap(df: pd.DataFrame, regions: list[dict], moc
     return centroids, blink_frames[best_idx]
 
 
-def find_lights_video(images:list[np.ndarray], n_images:int, region:tuple, square_side_tolerance:float = 5, max_side_length:float = 55, pixel_thresh:int = 75, circle_thresh:float = 0.3, mocap_over_vis_fps:float = 5, not_ir_thresh:float = 3):
+def find_lights_video(images:list[np.ndarray], n_images:int, region:tuple, calibration_path:str, square_tol:float = 5, diag_tol:float = 0.3, max_side_length:float = 55, pixel_thresh:int = 75, circle_thresh:float = 0.3, mocap_over_vis_fps:float = 5, not_ir_thresh:float = 3, frame_width:int = 7000, frame_height:int = 7000, arena_radius:int = 2):
     '''Use thresholding and contours to find the calibration box (and the lights' positions).
     region defines bounds for looking for box and are important due to blurriness of photos: (ymin, ymax, xmin, xmax) -> image plotting convention.
     max_side_length defines the maximum side length of a square that fits the 4 lights. This is to exclude the screw holes in the corners of the calibration box that also form a square and have roughly the same colour and shape.'''
 
     # Use multiple images for precise estimate of light positions and to ensure there are some frames in which the fourth (visual) light is on/off
     images = images[:n_images]
+
+    # Read images if they are file paths and dewarp them. Also compute the warp matrix
+    # so we can map the requested `region` (which is in original image pixel coords)
+    # into rectified/image-arena pixel coordinates for cropping.
+    dewarped_images = []
+    warp_matrix = None
+    for _, img in enumerate(images):
+
+        im = cv2.imread(str(img))
+        rectified, world_bounds, px_per_m, wm, _ = dewarp_img(im, calibration_path, frame_width, frame_height, arena_radius)
+        dewarped_images.append(rectified)
+        if warp_matrix is None:
+            warp_matrix = wm
+
+    images = dewarped_images
     all_lights = []
     ir_lights = []
     vis_on_frames = np.full(len(images), False)
     y0, y1, x0, x1 = region
 
+    # Map the requested region (y0,y1,x0,x1 in original image pixels) into
+    # rectified/output-pixel coordinates using the warp matrix computed above.
+    # Region is provided as (ymin, ymax, xmin, xmax).
+    if warp_matrix is None:
+        raise RuntimeError("Warp matrix not available for mapping region to rectified image.")
+
+    # Corners in original image pixel coordinates: (x, y)
+    corners = np.array([[x0, y0, 1.0], [x1, y0, 1.0], [x0, y1, 1.0], [x1, y1, 1.0]], dtype=float).T
+    mapped = warp_matrix @ corners
+    mapped = (mapped[:2, :] / mapped[2, :]).T  # shape (4,2) as (x', y') in rectified image pixels
+
+    x_coords = mapped[:, 0]
+    y_coords = mapped[:, 1]
+    rx0 = int(np.floor(np.min(x_coords)))
+    rx1 = int(np.ceil(np.max(x_coords)))
+    ry0 = int(np.floor(np.min(y_coords)))
+    ry1 = int(np.ceil(np.max(y_coords)))
+
+    # Clip to rectified image bounds (use first dewarped image as reference)
+    h_ref, w_ref = images[0].shape[:2]
+    rx0 = max(0, min(rx0, w_ref - 1))
+    rx1 = max(0, min(rx1, w_ref))
+    ry0 = max(0, min(ry0, h_ref - 1))
+    ry1 = max(0, min(ry1, h_ref))
+
+    print(world_bounds)
+    print(rx0, rx1, ry0, ry1)
+
     # Process all images being used
     for i, img in enumerate(images):
 
         # Crop and threshold image to only show dark regions (IR lights are always dark, visual light is sometimes dark)
-        img = cv2.imread(img)[y0:y1, x0:x1]
+        img = img[ry0:ry1, rx0:rx1]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, pixel_thresh, 255, cv2.THRESH_BINARY_INV)
 
         # Find contours and keep positions of circular-ish ones
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         dot_list = [] # Store dots that are potentially the lights
+
+        # plt.imshow(thresh)
+        # plt.savefig(f'mocap_calibration2.png')
+        # raise ValueError("Debugging: check thresholded images.")
 
         for cnt in contours:
             if cv2.arcLength(cnt, True) > 0:
@@ -253,73 +268,71 @@ def find_lights_video(images:list[np.ndarray], n_images:int, region:tuple, squar
                     dot_list.append(np.array([cx, cy]))
 
         # Check every combination of 4 points
-        for combo in itertools.combinations(dot_list, 4):
-            valid = is_square_corners(combo, square_side_tolerance, max_side_length)
-            if valid:
-                all_lights.append(sort_pts(combo))
-                break
+        found4 = False
+        if len(dot_list) >= 4:
+            for combo in itertools.combinations(dot_list, 4):
+                if is_square_corners(combo, square_tol, diag_tol, max_side_length):
+                    all_lights.append(sort_pts(combo))
+                    found4 = True
+                    break
 
-        if not valid:
+        if not found4 and len(dot_list) >= 3:
             # Check every combination of 3 points (should be the case when the visual light is ON)
             for combo in itertools.combinations(dot_list, 3):
-                valid = is_square_corners(combo, square_side_tolerance, max_side_length)
-                if valid:
+                if is_square_corners(combo, square_tol, diag_tol, max_side_length):
                     ir_lights.append(sort_pts(combo))
                     vis_on_frames[i] = True
                     break
 
-    # Get median positions of the lights
-    all_lights = np.median(all_lights, axis = 0) + np.array([x0, y0]) # (4, x/y) -> normal convention; adding offsets to make coordinates absolute
-    ir_lights = np.median(ir_lights, axis = 0) + np.array([x0, y0])
-    
-    # Check which light is not an IR light
-    vis_light = all_lights[~np.all(all_lights==ir_lights[:, None], axis = 2).any(axis = 0)]
+    if len(all_lights) == 0 or len(ir_lights) == 0:
+        raise ValueError("No valid calibration light detections found in video images.")
 
-    # Make sure no IR lights were erroneously counted as visual-spectrum lights because they're not exactly equal to the median in all_lights
-    if len(vis_light) > 1:
-        not_vis_mask = np.full(len(vis_light), False)
+    # Compute median light positions across frames
+    all_lights = np.median(np.asarray(all_lights), axis=0)
+    ir_lights = np.median(np.asarray(ir_lights), axis=0)
 
-        # Check proximity to known IR lights
-        for i, vis in enumerate(vis_light):
-            not_vis_mask[i] = np.sum(np.linalg.norm(vis - ir_lights, axis = 1) < not_ir_thresh, axis = 0).astype(bool) # not_ir_thresh is in pixels
-        vis_light = vis_light[~not_vis_mask]
+    # Determine the visual-spectrum light as the point farthest from the 3 IR lights.
+    if all_lights.ndim != 2 or all_lights.shape[1] != 2:
+        raise ValueError(f"Unexpected all_lights shape: {all_lights.shape}")
+    if ir_lights.ndim != 2 or ir_lights.shape[1] != 2:
+        raise ValueError(f"Unexpected ir_lights shape: {ir_lights.shape}")
 
-    plt.imshow(cv2.imread(images[0])) # Plot IR coordinates on last image
-    for (cx, cy) in ir_lights:
-        plt.scatter(cx, cy, s = 0.75, c = 'blue')
+    distances = np.linalg.norm(all_lights[:, None, :] - ir_lights[None, :, :], axis=2)
+    mean_dist = np.mean(distances, axis=1)
+    vis_idx = int(np.argmax(mean_dist))
+    vis_light = all_lights[vis_idx:vis_idx+1]
+    ir_lights = np.delete(all_lights, vis_idx, axis=0)
+
+    if vis_light.shape != (1, 2) or ir_lights.shape != (3, 2):
+        raise ValueError(
+            f"Unexpected visual/IR light split after selection: vis_light={vis_light.shape}, ir_lights={ir_lights.shape}. "
+            "Check pixel_thresh, square_tol, diag_tol, max_side_length, and the calibration image region."
+        )
+
+    ir_lights = ir_lights.astype(float) + np.array([rx0, ry0], dtype=float)  # Add offsets to put coordinates in absolute pixel coordinates (not cropped image coordinates)
+    vis_light = vis_light.astype(float) + np.array([rx0, ry0], dtype=float)
+
+    assert len(vis_light) == 1, f"Anomalous number of visual-spectrum lights detected ({len(vis_light)}) - check pixel_thresh, square_tol, diag_tol, max_side_length, and not_ir_thresh parameters."
+
+    plt.imshow(images[0]) # Plot IR coordinates on last image
+
+    # Plot IR lights in blue and visual light in orange
+    ir_x = ir_lights[:, 0]
+    ir_y = ir_lights[:, 1]
+    plt.scatter(ir_x, ir_y, s = 0.75, c = 'blue')
     plt.scatter(vis_light[0][0], vis_light[0][1], s = 0.75, c = 'orange')
     plt.xlim([np.min(ir_lights, axis = 0)[0] - 100, np.max(ir_lights, axis = 0)[0] + 100])
     plt.ylim([np.min(ir_lights, axis = 0)[1] - 100, np.max(ir_lights, axis = 0)[1] + 100])
-    plt.savefig('mocap_calibration2.png')
+    plt.savefig('mocap_calibration3.png')
 
-    assert len(vis_light) == 1, f"Anomalous number of visual-spectrum lights detected ({len(vis_light)}) - check pixel_thresh, square_side_tolerance, circle_thresh, max_side_length, and not_ir_thresh parameters."
+    # Rescale the points to pixel coordinates for visualization
+    xmin = world_bounds["xmin"]
+    ymax = world_bounds["ymax"]
 
-    return ir_lights, vis_light[0], np.repeat(vis_on_frames, mocap_over_vis_fps) # Put frames in MoCap fps
+    ir_lights = np.column_stack([ir_lights[:, 0] / px_per_m + xmin, ymax - ir_lights[:, 1] / px_per_m])
+    vis_light = np.column_stack([vis_light[:, 0] / px_per_m + xmin, ymax - vis_light[:, 1] / px_per_m])
 
-# def estimate_similarity_transform(points_a, points_b):
-#     """
-#     Estimate rotation R, scale s, translation t such that:
-#         points_b[i] ≈ s * R @ points_a[i] + t
-#     Uses the Umeyama least-squares method. points_a, points_b: (N,2) arrays, N>=2.
-#     """
-#     points_a = np.asarray(points_a, dtype=np.float64)
-#     points_b = np.asarray(points_b, dtype=np.float64)
-
-#     centroid_a = points_a.mean(axis=0)
-#     centroid_b = points_b.mean(axis=0)
-#     a_centered = points_a - centroid_a
-#     b_centered = points_b - centroid_b
-
-#     H = a_centered.T @ b_centered
-#     U, S, Vt = np.linalg.svd(H)
-#     d = np.sign(np.linalg.det(Vt.T @ U.T))
-#     R = Vt.T @ np.diag([1.0, d]) @ U.T
-
-#     var_a = np.sum(a_centered ** 2)
-#     s = float(np.sum(S * np.array([1.0, d])) / var_a)
-
-#     t = centroid_b - s * (R @ centroid_a)
-#     return R, s, t
+    return ir_lights, vis_light[0], np.repeat(vis_on_frames, int(mocap_over_vis_fps)) # Put frames in MoCap fps
 
 def estimate_similarity_transform(points_a, points_b, allow_reflection=True):
     """
@@ -525,17 +538,21 @@ def apply_transform(points_a, R, s, t):
     out = s * (pts @ R.T) + t
     return out[0] if single else out
 
-def check_transform(ds, df, R, s, t, frame, lag):
+def check_transform(ds, df, R, s, t, frame, lag, mocap_fps: float = 25, vid_fps: float = 5):
 
     # Transform MoCap data
     mocap_positions = df_to_padded_array(df, R, s, t) # (x/y, n_mocap_frames, max_n)
 
-    # Get positions from video detections
+    # Get positions from video detections (dataset-relative index)
     vid_positions = np.array([ds['centroid_x'].values, ds['centroid_y'].values]) # (x/y, n_vid_frames, max_n)
 
+    mocap_frame = int(round(frame * mocap_fps / vid_fps - lag))
+    if mocap_frame < 0 or mocap_frame >= mocap_positions.shape[1]:
+        raise IndexError(f"Computed mocap_frame {mocap_frame} outside MoCap range 0-{mocap_positions.shape[1] - 1}.")
+
     fig = plt.figure()
-    plt.scatter(vid_positions[0,frame,:], vid_positions[1,frame,:], alpha = 0.1)
-    plt.scatter(mocap_positions[0,frame - lag,:], mocap_positions[1,frame-lag,:], alpha = 0.1)
+    plt.scatter(vid_positions[0, frame, :], vid_positions[1, frame, :], alpha=0.1)
+    plt.scatter(mocap_positions[0, mocap_frame, :], mocap_positions[1, mocap_frame, :], alpha=0.1)
     plt.savefig('mocap_calibration5.png')
 
     min_x = min(np.nanmin(mocap_positions[0,:,:]), np.nanmin(vid_positions[0,:,:]))
@@ -567,6 +584,225 @@ def check_transform(ds, df, R, s, t, frame, lag):
     map=ax[1].imshow(moc_hist, vmin = extrema[0], vmax = extrema[1], cmap = 'viridis')
     plt.colorbar(map, cmap = 'viridis')
     plt.savefig('mocap_calibration8.png')    
+
+def assess_calibration(ds: xr.Dataset, df: pd.DataFrame, R: np.ndarray, s: float, t: np.ndarray, video_frame: int, lag: int, image_path: str | Path | None = None, calibration_path: str | None = None, 
+                       frame_width: int | None = 7000, frame_height: int | None = 7000, arena_radius: float | None = 2, vid_folder: str | Path | None = None,
+                       mocap_batch_len: int = 7500, mocap_fps: float = 25, vid_fps: float = 5, zoom_padding: float = 250, zoom_quantile: float = 0.5,
+                       save_path: str | Path = "mocap_calibration_overlay.png", ax=None):
+    """
+    Plot transformed MoCap detections over video detections and, optionally, the
+    corresponding video frame.
+
+    Positive lag follows temporal_synch: MoCap starts after video. The plotted
+    MoCap frame is therefore:
+
+        video_frame * mocap_fps / vid_fps - lag - batch_offset
+
+    where batch_offset is mocap_batch_len * mocap_batch.
+    """
+
+    print('WARNING: make sure appropriate MoCap batch is input to this function, otherwise the lag will be wrong and the overlay will be meaningless.')
+
+    video_frame_idx = int(video_frame)
+    if video_frame_idx < 0 or video_frame_idx >= ds['frame'].size:
+        raise IndexError(f"video_frame {video_frame_idx} outside dataset frame range 0-{ds['frame'].size - 1}.")
+
+    # Translate the dataset-relative frame index into the actual video frame label
+    # stored in the xarray coordinate. This is necessary when ds.frame does not
+    # start at 0 and the image sequence is indexed by absolute video frame number.
+    video_frame_label = int(ds['frame'].values[video_frame_idx])
+
+    # Find the corresponding MoCap frame for the given actual video frame label and lag.
+    batch_offset = ((video_frame_label * mocap_fps / vid_fps) // mocap_batch_len) * mocap_batch_len
+    mocap_frame = int(round(video_frame_label * mocap_fps / vid_fps - lag - batch_offset))
+
+    # Get the positions for the video
+    vid_positions = np.array([ds['centroid_x'].values, ds['centroid_y'].values])
+    if video_frame_idx < 0 or video_frame_idx >= vid_positions.shape[1]:
+        raise IndexError(f"video_frame {video_frame_idx} outside video range 0-{vid_positions.shape[1] - 1}.")
+
+    # Transform the positions for the MoCap data
+    mocap_positions = df_to_padded_array(df, R, s, t)
+    if mocap_frame < 0 or mocap_frame >= mocap_positions.shape[1]:
+        raise IndexError(f"Computed mocap_frame {mocap_frame} outside MoCap range 0-{mocap_positions.shape[1] - 1}.")
+
+    # Get rid of nans
+    vid_pts = vid_positions[:, video_frame_idx, :].T
+    vid_pts = vid_pts[np.isfinite(vid_pts).all(axis=1)]
+
+    mocap_pts = mocap_positions[:, mocap_frame, :].T
+    mocap_pts = mocap_pts[np.isfinite(mocap_pts).all(axis=1)]
+
+    # Add image to plot
+    image = None
+    if image_path is None and vid_folder is not None:
+        images = load_image_sequence(str(vid_folder))
+        if video_frame_label >= len(images):
+            raise IndexError(f"video_frame_label {video_frame_label} outside image sequence length {len(images)}.")
+        image_path = images[video_frame_label]
+
+    if image_path is not None:
+        image = cv2.imread(str(image_path))
+        
+        # Dewarp image
+        image, world_bounds, px_per_m, _, _ = dewarp_img(image, calibration_path, frame_width, frame_height, arena_radius)
+
+    created_fig = ax is None
+    if ax is None:
+        _, ax = plt.subplots(figsize=(9, 9))
+
+    if image is not None:
+        ax.imshow(image)
+
+    xmin = world_bounds["xmin"]
+    ymax = world_bounds["ymax"]
+
+    # Rescale the points to pixel coordinates for visualization
+    vid_x = (vid_pts[:,0] - xmin) * px_per_m
+    vid_y = (ymax - vid_pts[:,1]) * px_per_m
+    mocap_x = (mocap_pts[:,0] - xmin) * px_per_m
+    mocap_y = (ymax - mocap_pts[:,1]) * px_per_m
+
+    ax.scatter(vid_x, vid_y, s=5, c="deepskyblue", alpha=0.25, linewidths=0, label="Video detections")
+    ax.scatter(mocap_x, mocap_y, s=22, facecolors="none", edgecolors="orange", alpha=0.9, linewidths=1.1, label="Transformed MoCap")
+
+    # nonempty_pts = [pts for pts in [vid_pts, mocap_pts] if len(pts) > 0]
+    # if len(nonempty_pts) == 0:
+    #     raise ValueError("No finite video or MoCap points available for this frame/lag.")
+    # zoom_pts = np.vstack(nonempty_pts)
+    # q_low = (1 - zoom_quantile) / 2
+    # q_high = 1 - q_low
+    # x0, y0 = np.nanquantile(zoom_pts, q_low, axis=0) - zoom_padding
+    # x1, y1 = np.nanquantile(zoom_pts, q_high, axis=0) + zoom_padding
+
+    # if image is not None:
+    #     h, w = image.shape[:2]
+    #     x0, x1 = np.clip([x0, x1], 0, w - 1)
+    #     y0, y1 = np.clip([y0, y1], 0, h - 1)
+
+    # ax.set_xlim(x0, x1)
+    # ax.set_ylim(y1, y0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(f"Video frame {video_frame}, MoCap frame {mocap_frame}, lag {lag}")
+    ax.legend(loc="upper right")
+
+    if save_path is not None and created_fig:
+        plt.savefig(save_path, dpi=200, bbox_inches="tight")
+
+    return {
+        "video_frame": video_frame,
+        "mocap_frame": mocap_frame,
+        "video_points": vid_pts,
+        "mocap_points": mocap_pts,
+        "ax": ax,
+    }
+
+def compare_arena_scale_from_occupancy(
+    ds: xr.Dataset,
+    df: pd.DataFrame,
+    R: np.ndarray,
+    s: float,
+    t: np.ndarray,
+    n_bins: int = 180,
+    center: np.ndarray | None = None,
+    threshold_fraction: float = 0.15,
+    save_path: str | Path = "mocap_arena_scale_check.png",
+) -> dict:
+    """
+    Compare video and transformed-MoCap occupancy as radial profiles.
+
+    This is a coarse arena-scale diagnostic. It avoids relying on instantaneous
+    nearest-neighbour matches and instead asks whether the long-time occupancy
+    fields fall off at similar radii around a shared center.
+    """
+
+    vid_positions = np.array([ds['centroid_x'].values, ds['centroid_y'].values])
+    mocap_positions = df_to_padded_array(df, R, s, t)
+
+    vid_pts = vid_positions.reshape(2, -1).T
+    vid_pts = vid_pts[np.isfinite(vid_pts).all(axis=1)]
+    mocap_pts = mocap_positions.reshape(2, -1).T
+    mocap_pts = mocap_pts[np.isfinite(mocap_pts).all(axis=1)]
+
+    all_pts = np.vstack([vid_pts, mocap_pts])
+    x_edges = np.linspace(np.nanmin(all_pts[:, 0]), np.nanmax(all_pts[:, 0]), n_bins + 1)
+    y_edges = np.linspace(np.nanmin(all_pts[:, 1]), np.nanmax(all_pts[:, 1]), n_bins + 1)
+
+    vid_hist, _, _ = np.histogram2d(vid_pts[:, 0], vid_pts[:, 1], bins=[x_edges, y_edges], density=True)
+    mocap_hist, _, _ = np.histogram2d(mocap_pts[:, 0], mocap_pts[:, 1], bins=[x_edges, y_edges], density=True)
+
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2
+    xs, ys = np.meshgrid(x_centers, y_centers, indexing="ij")
+
+    if center is None:
+        # Video occupancy has the clearer arena boundary, so use it to estimate
+        # the shared center for radial diagnostics.
+        weights = np.nan_to_num(vid_hist, nan=0.0)
+        if weights.sum() == 0:
+            raise ValueError("Video occupancy is empty.")
+        center = np.array([
+            np.sum(xs * weights) / np.sum(weights),
+            np.sum(ys * weights) / np.sum(weights),
+        ])
+    else:
+        center = np.asarray(center, dtype=float)
+
+    radii = np.sqrt((xs - center[0])**2 + (ys - center[1])**2)
+    max_r = np.nanpercentile(radii, 99)
+    r_edges = np.linspace(0, max_r, n_bins + 1)
+    r_centers = (r_edges[:-1] + r_edges[1:]) / 2
+
+    def radial_profile(hist):
+        prof = np.full(n_bins, np.nan)
+        for i in range(n_bins):
+            mask = (radii >= r_edges[i]) & (radii < r_edges[i + 1])
+            if np.any(mask):
+                prof[i] = np.nanmean(hist[mask])
+        return prof
+
+    vid_profile = radial_profile(vid_hist)
+    mocap_profile = radial_profile(mocap_hist)
+
+    def estimate_radius(profile):
+        if not np.isfinite(profile).any():
+            return np.nan
+        smooth = _rolling_nanmean(profile, max(3, n_bins // 40))
+        peak = np.nanmax(smooth)
+        if peak <= 0 or not np.isfinite(peak):
+            return np.nan
+        below = np.where(smooth < threshold_fraction * peak)[0]
+        below = below[below > np.nanargmax(smooth)]
+        return float(r_centers[below[0]]) if len(below) > 0 else np.nan
+
+    vid_radius = estimate_radius(vid_profile)
+    mocap_radius = estimate_radius(mocap_profile)
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+    ax[0].plot(r_centers, vid_profile / np.nanmax(vid_profile), label="video")
+    ax[0].plot(r_centers, mocap_profile / np.nanmax(mocap_profile), label="MoCap")
+    ax[0].axvline(vid_radius, color="tab:blue", linestyle="--")
+    ax[0].axvline(mocap_radius, color="tab:orange", linestyle="--")
+    ax[0].set_xlabel("Radius from shared center (px)")
+    ax[0].set_ylabel("Normalized occupancy")
+    ax[0].legend()
+
+    ax[1].imshow(vid_hist.T, origin="lower", extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]], cmap="Blues", alpha=0.65)
+    ax[1].imshow(mocap_hist.T, origin="lower", extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]], cmap="Oranges", alpha=0.45)
+    ax[1].scatter(center[0], center[1], c="white", s=20)
+    ax[1].set_aspect("equal", adjustable="box")
+    ax[1].set_title("Occupancy overlay")
+    plt.savefig(save_path, dpi=200, bbox_inches="tight")
+
+    return {
+        "center": center,
+        "radii": r_centers,
+        "video_profile": vid_profile,
+        "mocap_profile": mocap_profile,
+        "video_radius": vid_radius,
+        "mocap_radius": mocap_radius,
+        "radius_ratio_mocap_over_video": mocap_radius / vid_radius if vid_radius > 0 else np.nan,
+    }
 
 def df_to_padded_array(df, R, s, t):
 
@@ -704,7 +940,7 @@ def score_lags_with_median_density(
     This assumes the MoCap subset is large enough to preserve population-level
     density oscillations. Absolute density units may differ between video and
     MoCap; both signals are z-scored before scoring. Positive lags use the same
-    convention as temporal_synch: MoCap occurs before video.
+    convention as temporal_synch: MoCap starts after video.
     """
 
     candidate_lags = np.asarray(candidate_lags, dtype=int)
@@ -884,13 +1120,13 @@ def score_lags_with_median_density_sweep(
         "raw_mocap_density": raw_mocap_density,
     }
 
-def temporal_synch(mocap_blinks:np.ndarray[bool], vid_blinks:np.ndarray[bool], df:pd.DataFrame, ds:xr.Dataset, R:np.ndarray, s:np.ndarray, t:np.ndarray, mocap_batch:int, mocap_batch_len:int = 7500, mocap_fps:float = 25, vid_fps:float = 5, xcorr_buffer_frames:int = 1000, n_frames_per_lag:int = 50):
+def temporal_synch(mocap_blinks:np.ndarray[bool], vid_blinks:np.ndarray[bool], df:pd.DataFrame, ds:xr.Dataset, R:np.ndarray, s:np.ndarray, t:np.ndarray, mocap_batch:int, mocap_batch_len: int = 7500, mocap_fps:float = 25, vid_fps:float = 5, xcorr_buffer_frames:int = 1000, n_frames_per_lag:int = 50):
     '''Cross-correlate blinking time series to find relative offset. Due to periodicity of signals, need to disambiguate offset by evaluating overlap of (transformed) MoCap and visual detections.'''
 
     # Cross correlate MoCap w.r.t. video
     buff = min(xcorr_buffer_frames, min(len(mocap_blinks) - 1, len(vid_blinks) - 1))
     xcorr = np.correlate(vid_blinks.astype(int), mocap_blinks.astype(int), mode = 'full')[len(mocap_blinks) - 1 - buff:len(mocap_blinks) + buff] # Excerpt chunk of values around lag of 0
-    lags = np.arange(len(xcorr)) - buff # Positive means MoCap before vid, and vice versa
+    lags = np.arange(len(xcorr)) - buff # Positive means MoCap starts after video
     # plt.plot(lags, xcorr)
     # plt.savefig('mocap_calibration4.png')
 
@@ -902,13 +1138,17 @@ def temporal_synch(mocap_blinks:np.ndarray[bool], vid_blinks:np.ndarray[bool], d
 
     # Find peaks in xcorr signal
     peak_frames, _ = find_peaks(xcorr,
-                                distance=period_frames * 0.5,   # troughs at least half a period apart
+                                distance=period_frames * 0.8,   # troughs at least x percent of a period apart
                                 prominence=0.1)                  # ignore shallow noise fluctuations
     
     # Use median density signal to align video and MoCap in time
     candidate_lags = lags[peak_frames]
-    results = score_lags_with_median_density_sweep(df, ds, candidate_lags, mocap_batch=mocap_batch, mocap_batch_len=mocap_batch_len, mocap_fps=mocap_fps, vid_fps=vid_fps)
-    lag = results['consensus_lag']
+    # results = score_lags_with_median_density_sweep(df, ds, candidate_lags, mocap_batch=mocap_batch, mocap_batch_len=mocap_batch_len, mocap_fps=mocap_fps, vid_fps=vid_fps)
+    # lag = results['consensus_lag']
+
+    results = score_lags_with_median_density(df, ds, candidate_lags, mocap_batch, mocap_batch_len, mocap_fps, vid_fps, k = 5, smooth_seconds = 0.4) # Faster than doing the whole sweep
+    lag = results['best_lag']
+    print('Best lag: ', lag)
 
     # fig = plt.figure()
     # plt.plot(candidate_lags, results['median_score_by_lag'])
@@ -931,55 +1171,9 @@ def temporal_synch(mocap_blinks:np.ndarray[bool], vid_blinks:np.ndarray[bool], d
     # print("Median-density consensus lag:", results["consensus_lag"])
     # print("Median-density consensus fraction:", results["consensus_fraction"])
 
-    # Pre-load ds data
-    # vid_positions = np.array([ds['centroid_x'].values, ds['centroid_y'].values]) # (x/y, n_vid_frames, max_n)
-    # mocap_positions = df_to_padded_array(df, R, s, t) # (x/y, n_mocap_frames, max_n) -> also transformed into video coordinates
+    return lag
 
-    # # Iterate over each peak lag
-    # frame_costs = np.full((len(peak_frames), n_frames_per_lag), np.inf)
-    # mocap_frames = np.random.randint(buff, len(mocap_blinks) - buff, n_frames_per_lag) # Assure there can always be a corresponding video frame regardless of lag
-
-    # for f, lag in enumerate(lags[peak_frames]):
-
-    #     # Determine corresponding video frames
-    #     video_frames = np.round((mocap_frames + lag + mocap_batch_len * mocap_batch) * vid_fps / mocap_fps).astype(int)
-
-    #     for i in range(n_frames_per_lag):
-
-    #         # Get video and MoCap detections
-    #         vid_f = vid_positions[:, video_frames[i], :] # Contains nans
-    #         mocap_f = mocap_positions[:, mocap_frames[i], :]
-    #         # print(mocap_f)
-
-    #         # Drop nan (missing) video detections before building the tree
-    #         valid = ~np.isnan(vid_f).any(axis=0)
-    #         vid_pts = vid_f[:, valid].T # (n_valid_vid, 2)
-
-    #         # Drop nan mocap detections
-    #         valid = ~np.isnan(mocap_f).any(axis=0)
-    #         mocap_pts = mocap_f[:, valid].T # (n_valid_mocap, 2)
-
-    #         if vid_pts.shape[0] == 0 or mocap_pts.shape[0] == 0:
-    #             frame_costs[f,i] = np.inf
-    #             print('No video/MoCap points in the frame.')
-    #             continue
-
-    #         # For each MoCap detection, find its nearest video detection
-    #         tree = cKDTree(vid_pts)
-    #         dists, _ = tree.query(mocap_pts, k=1)
-
-    #         # Compute score for this frame
-    #         frame_costs[f, i] = np.median(dists)
-
-    # # Find temporal offset
-    # frame_costs = np.median(frame_costs, axis = 1)
-    # offset = lags[peak_frames[np.argmin(frame_costs)]]  # +ve is MoCap before vid, and vice versa
-    # print(offset)
-    # print(np.min(frame_costs))
-    # print(frame_costs)
-
-
-def calibrate_mocap(vid_folder:str, mocap_folder:str, ds:xr.Dataset, video_box_region:tuple, mocap_fps:float = 25, vid_fps:float = 5):
+def full_synchronization(vid_folder:str, calibration_path:str, mocap_folder:str, ds:xr.Dataset, video_box_region:tuple, mocap_fps:float = 25, vid_fps:float = 5, frame_width:int = 7000, frame_height:int = 7000, arena_radius:int = 2):
     ''' Calibrate mocap data spatially and temporally. MoCap csvs have columns: frame, time, particle_id, x, y, z. Frame and time (and also particle ids, probably) reset every file.'''
 
     # Load image and mocap files
@@ -999,14 +1193,18 @@ def calibrate_mocap(vid_folder:str, mocap_folder:str, ds:xr.Dataset, video_box_r
     regions, mocap_arena_center, mocap_arena_r = find_regions_of_interest_mocap(thresholded, x_bins, y_bins)
 
     # Determine which region contains the blinking IR lights
-    mocap_irs, mocap_blinks = validate_region_of_interest_mocap(df, regions, mocap_arena_center, mocap_arena_r, square_side_tolerance = 5)
+    mocap_irs, mocap_blinks = validate_region_of_interest_mocap(df, regions, mocap_arena_center, mocap_arena_r, square_tol = 5, diag_tol = 0.3, max_side_length = 55)
 
     # Find lights in the video
-    vid_irs, _, vid_blinks = find_lights_video(images, 150, video_box_region, mocap_over_vis_fps = mocap_fps/vid_fps)
+    vid_irs, _, vid_blinks = find_lights_video(images, 150, video_box_region, calibration_path, square_tol = 5, diag_tol = 0.3, max_side_length = 55, mocap_over_vis_fps = mocap_fps/vid_fps, frame_width = frame_width, frame_height = frame_height, arena_radius = arena_radius)
 
     # Find spatial transformation matrices
     best = estimate_best_similarity_transform(mocap_irs[:,:2], vid_irs)
     R, s, t = best['R'], best['s'], best['t']
+    print("Spatial transform calibration-light RMSE:", best["rmse"])
+    print("Spatial transform calibration-light residuals:", best["residuals"])
+    print("Spatial transform determinant:", best["det"])
+    print("Spatial transform permutation:", best["permutation"])
 
     # err = evaluate_transform_error(mocap_irs[:,:2], vid_irs, R, s, t)
     # print(err)
@@ -1015,22 +1213,29 @@ def calibrate_mocap(vid_folder:str, mocap_folder:str, ds:xr.Dataset, video_box_r
     # print(apply_transform(mocap_irs[:,:2], R, s, t))
     # print(R, s, t)
 
-    # fig = plt.figure()
-    # plt.scatter(vid_irs[:,0], vid_irs[:,1])
-    # transformed = apply_transform(mocap_irs[:,:2], R, s, t)
-    # print(vid_irs, mocap_irs[:,:2])
-    # print(np.linalg.det(R))
-    # plt.scatter(transformed[:,0], transformed[:,1])
-    # plt.savefig('mocap_calibration6.png')
-    # check_transform(ds, df, R, s, t, 200, -455)
+    fig = plt.figure()
+    plt.scatter(vid_irs[:,0], vid_irs[:,1])
+    transformed = apply_transform(mocap_irs[:,:2], R, s, t)
+    print(vid_irs, mocap_irs[:,:2])
+    print(np.linalg.det(R))
+    plt.scatter(transformed[:,0], transformed[:,1])
+    plt.savefig('mocap_calibration6.png')
+    
 
-    # # Find time series of blinking visual light
-    temporal_synch(mocap_blinks, vid_blinks, df, ds, R, s, t, mocap_batch, mocap_fps = mocap_fps, vid_fps = vid_fps)
+    # Find time series of blinking visual light
+    lag = temporal_synch(mocap_blinks, vid_blinks, df, ds, R, s, t, mocap_batch, mocap_fps = mocap_fps, vid_fps = vid_fps)
+    check_transform(ds, df, R, s, t, 50, lag)
 
+    # Check quality of time (and spatial) calibration by plotting a subset of a video frame with MoCap detections overlayed
+    vid_frame = 20
+    image_index = int(ds['frame'].values[vid_frame])
+    assess_calibration(ds, df, R, s, t, vid_frame, lag, images[image_index], calibration_path = calibration_path, frame_width = frame_width, frame_height = frame_height,
+                       arena_radius = arena_radius, vid_folder = vid_folder, mocap_fps = mocap_fps, vid_fps = vid_fps)
 
+    # results = compare_arena_scale_from_occupancy(ds, df, R, s, t)
+    # print(results)
 
-h5_prep = f'/keypoints/20230329_preprocessed_complete_batch_1_5.0Hz.hdf5'
+h5_prep = f'/keypoints/20230329_preprocessed_complete_dewarped_batch_0_5.0Hz.hdf5'
+calibration_path = '/full_intrinsics_output/calibration.yaml'
 ds = load_preprocessed_data(h5_prep)
-calibrate_mocap('/original/20230329/video/', '/mocap/20230329/', ds, (600, 900, 6300, 6600)) #(6300, 6600, 600, 900))
-
-# is_square_corners(pts = np.array([[0, 0], [1, 0], [1, 1], [0, 1]]), tol = 0.15)
+full_synchronization('/original/20230329/video/', calibration_path, '/mocap/20230329/', ds, (600, 900, 6300, 6600)) #(6300, 6600, 600, 900))
