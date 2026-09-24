@@ -1,1 +1,0 @@
-model,status,n_parameters,n_points,n_pairs,train_rmse,train_median_error,cv_rmse,cv_median_error,cv_nrmse,cv_group_rmse_mean,cv_group_rmse_se,cv_folds_used
