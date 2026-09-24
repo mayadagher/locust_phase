@@ -28,3 +28,4 @@ imageio[ffmpeg]
 plotly
 shapely
 scikit-image
+tqdm_joblib

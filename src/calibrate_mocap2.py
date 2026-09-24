@@ -1917,7 +1917,7 @@ def full_calibration(img_dir:str, calibration_path:str, mocap_folder:str, mocap_
     # STEP 5: Validate calibration
     # validate_transform_and_lag(mocap_df, vid_irs, mocap_irs, mocap_lag, img_dir, calibration_path, frame_width, frame_height, arena_radius, mocap_fps, vid_fps, 50, plots_path)
     # print('validating')
-    validate_transform(ds, mocap_df, vid_irs, mocap_irs, plots_path)
+    validate_transform(vid_ds, mocap_df, vid_irs, mocap_irs, plots_path)
 
 plots_path = '/output/20230329/kp_plots/calibration/'
 calibration_path = '/intrinsics/arena_board_calibration/calibration_official.yaml'

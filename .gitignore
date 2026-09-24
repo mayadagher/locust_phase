@@ -14,5 +14,5 @@ __pycache__/
 # Ignore .html files
 *.html
 
-# Ignore plots
-plots/
+# Ignore calibration folder
+src/intrinsic_calibration/

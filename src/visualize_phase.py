@@ -39,9 +39,9 @@ def plot_phase(ds:xr.Dataset, x_var:str, y_var:str, output_dir:str, labels:list[
 
     plt.grid(True, linestyle='--', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_dir + f'phase_space_{x_var}_{y_var}.png')
+    plt.savefig(output_dir + f'phase_space_{x_var}_{y_var}_dewarped.png')
 
-def plot_distribution_over_time(ds: xr.Dataset, y_var: str, y_label:str, output_dir: str, title:str, y_factor:int = 1, fps:int = 5, start_frame:int = 0, end_frame:int = None, y_bins:int =50, time_bins:int =200, subsample:int = 1):
+def plot_distribution_over_time(ds: xr.Dataset, y_var: str, y_label:str, output_dir: str, title:str, y_factor:int = 1, fps:int = 5, start_frame:int = 0, end_frame:int = None, y_bins:int = 50, y_quant:float = 1, time_bins:int =200, subsample:int = 1):
     """
     Plots a 2D histogram showing the evolution of the population's distribution.
     
@@ -58,13 +58,13 @@ def plot_distribution_over_time(ds: xr.Dataset, y_var: str, y_label:str, output_
     _, n_ids = dist_array.shape
     
     # 1. Create coordinates for every single data point
-    x = np.repeat(ds_idcs, n_ids) / fps # Convert frames to seconds
+    x = np.repeat(abs_frames, n_ids) / fps # Convert frames to seconds
     
     # Flatten the density values
     y = dist_array.flatten()*y_factor # Rescale if necessary
     
-    # 2. Mask out NaNs (critical for tracking data)
-    mask = ~np.isnan(y)
+    # 2. Mask out NaNs and noisy values
+    mask = (~np.isnan(y)) & (y <= np.nanquantile(y, y_quant))
     x_clean = x[mask]
     y_clean = y[mask]
     
@@ -78,12 +78,14 @@ def plot_distribution_over_time(ds: xr.Dataset, y_var: str, y_label:str, output_
     cb = plt.colorbar(h[3])
     cb.set_label('Num. individuals', rotation=270, fontsize = 15, labelpad=15)
     plt.title(title, fontsize = 17)
-    plt.xlabel('Time (s)', fontsize=15)
+    plt.xlabel('Experiment time (s)', fontsize=15)
     plt.ylabel(y_label, fontsize=15)
     
     plt.grid(True, linestyle=':', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_dir + f'{y_var}_hist_over_time_{abs_frames[0]}_{abs_frames[1]}_fs_{fps/round(np.diff(abs_frames)[0])}.png')
+    plt.savefig(output_dir + f'hists_over_time/{y_var}_{abs_frames[0]}_{abs_frames[-1]}_fs_{fps/round(np.diff(abs_frames)[0])}.png')
+
+    print(f'Histogram over time saved to {output_dir}hists_over_time/{y_var}_{abs_frames[0]}_{abs_frames[-1]}_fs_{fps/round(np.diff(abs_frames)[0])}.png')
 
 def plot_voronoi_corr_single_frame(ds:xr.Dataset, param:str, frame_idx:int, arena_center:np.ndarray, arena_radius:float, output_dir:str, title:str, tolerance:float= 1e-6, param_type: Literal["scalar", "circular"] = "scalar", max_layer:int | None = None, min_pairs_per_layer:int = 5, subsample:int | None = None):
 

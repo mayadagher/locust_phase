@@ -1,0 +1,26 @@
+video_id,mocap_id,shape_cost,n_common_samples,common_fraction,video_motion_scale,mocap_motion_scale,video_max_step_ratio,row_margin,column_margin,assignment_margin,accepted,rejection_reason
+4952.0,892,0.12280694395303726,296,0.9866666666666667,0.4488673508167267,0.17425250363562356,25.949432373046875,0.5128684639930725,0.007334105670452118,0.007334105670452118,False,assignment is ambiguous
+6789.0,16912,0.2756980061531067,260,0.8666666666666667,0.3559875190258026,740.1556781978072,235.0305633544922,0.25192809104919434,0.00574377179145813,0.00574377179145813,False,assignment is ambiguous
+3025.0,3216,0.3891681134700775,223,0.7433333333333333,0.11304785311222076,42.820963163144164,24.29154396057129,0.2754041850566864,0.002989470958709717,0.002989470958709717,False,assignment is ambiguous
+7676.0,53675,0.44775310158729553,184,0.6133333333333333,0.468423455953598,477.0362054401888,136.34835815429688,-0.07924246788024902,0.01604938507080078,-0.07924246788024902,False,assignment is ambiguous
+7115.0,710,0.47091129422187805,288,0.96,0.45163285732269287,3.496034877854549,8.09671688079834,0.039799660444259644,0.001977771520614624,0.001977771520614624,False,assignment is ambiguous
+8212.0,25420,0.5245058536529541,194,0.6466666666666666,0.3403257727622986,550.2328718266881,3.2268450260162354,0.2174314260482788,0.01626729965209961,0.01626729965209961,False,assignment is ambiguous
+4849.0,1193,0.527931272983551,273,0.91,0.13340669870376587,0.05678827528836194,1252.901123046875,0.14633047580718994,0.016604483127593994,0.016604483127593994,False,assignment is ambiguous
+,2,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,267,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,318,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,387,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,904,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,1285,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,1723,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,1880,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,2170,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,5686,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,21696,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,32726,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,33403,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,62473,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,62801,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,66966,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,68293,,0,0.0,,,,,,,False,no video assignment below unmatched cost
+,71058,,0,0.0,,,,,,,False,no video assignment below unmatched cost

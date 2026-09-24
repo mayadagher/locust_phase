@@ -852,8 +852,11 @@ def interactive_voronoi_overlay(ds:xr.Dataset, param:str, output_dir:str, arena_
     # Set up colour bins
     colourscale = pc.sample_colorscale(cmap, n_bins)
     z_min, z_max = np.nanmin(z), np.nanmax(z)
-    # if z_max > 10*np.nanstd(z) + np.nanmean(z): # If maximum is an outlier, replace with more reasonable maximum
-    #     z_max = 5*np.nanstd(z) + np.nanmean(z)
+    print('z extrema: ', z_min, z_max)
+    
+    if z_max > 5*np.nanstd(z) + np.nanmean(z): # If maximum is a huge outlier, replace with more reasonable maximum
+        z_max = np.nanquantile(z, 0.95)
+        print('z 95th quantile: ', z_max)
     bins = np.linspace(z_min, z_max, n_bins + 1)
 
     # Filter out detections outside of arena
@@ -1135,7 +1138,7 @@ def interactive_cluster_analysis(input_path: str, min_obs:int = 5, max_layers:in
               'Polarization by layer (centre)', 'Polarization by layer (edge)', 'Density by layer (centre)', 'Density by layer (edge)']
 
     # Initialize figure
-    fig = make_subplots(rows=3, cols=4, subplot_titles=titles, horizontal_spacing=0.16, vertical_spacing=0.12,
+    fig = make_subplots(rows=3, cols=4, subplot_titles=titles, horizontal_spacing=0.32, vertical_spacing=0.12,
                         specs=[[{"type": "bar"}, {"type": "bar"}, {"type": "bar"}, {"type": "scatter"}],
                                [{"secondary_y": True}, {"secondary_y": True}, {"type": "scatter"}, {"type": "scatter"}],
                                [{"type": "scatter"}, {"type": "scatter"}, {"type": "scatter"}, {"type": "scatter"}]])
@@ -1475,7 +1478,172 @@ def interactive_cluster_structure(ds:xr.Dataset, input_path:str, layer_cutoff:in
     fig.write_html(output_path)
     print(f'Saved to {output_path}')
     return fig
-            
+
+import os
+import numpy as np
+import xarray as xr
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+
+def plot_distribution_over_time_interactive(ds: xr.Dataset, y_var: str, y_label: str, output_dir: str, title: str, batch_num:int, y_factor: float = 1, fps: int = 5, start_frame: int = 0, end_frame: int = None, y_bins: int = 50, y_quant: float = 1, 
+                                            time_bins: int = 200, subsample: int = 1):
+    """Plot distribution over time with an interactive PDF for each time bin."""
+
+    # Get absolute frame values
+    abs_frames, ds_idcs = get_frame_slice(ds, rel_start=start_frame, rel_end=end_frame, in_function_subsample=subsample)
+
+    dist_array = ds[y_var].values[ds_idcs, :] * y_factor
+    _, n_ids = dist_array.shape
+
+    # Coordinates for every data point
+    x = np.repeat(abs_frames, n_ids) / fps
+    y = dist_array.flatten()
+
+    # Remove NaNs and values above requested quantile
+    y_max = np.nanquantile(y, y_quant)
+    mask = (~np.isnan(y)) & (y <= y_max)
+
+    x_clean = x[mask]
+    y_clean = y[mask]
+
+    # Compute histogram explicitly so both panels use identical bins
+    H, x_edges, y_edges = np.histogram2d(x_clean, y_clean, bins=[time_bins, y_bins])
+
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2
+    y_widths = np.diff(y_edges)
+
+    # Convert counts to log10 for heatmap visualization
+    # NaNs make zero-count bins transparent
+    H_log = np.where(H.T > 0, np.log10(H.T), np.nan)
+
+    # Initial PDF
+    counts = H[0]
+
+    if counts.sum() > 0:
+        pdf = counts / (counts.sum() * y_widths)
+    else:
+        pdf = np.zeros_like(counts)
+
+    fig = make_subplots(rows=1, cols=2, column_widths=[0.72, 0.28], horizontal_spacing=0.20, subplot_titles=("Distribution over time", "Distribution at selected time"))
+
+    # Left: 2D histogram
+    fig.add_trace(go.Heatmap(x=x_centers, y=y_centers, z=H_log, colorscale="Magma", colorbar=dict(title="log10(Num. individuals)", x=0.59),
+                  hovertemplate=("Time: %{x:.2f} s<br>" + y_label + ": %{y:.3g}<br>" "log10(count): %{z:.2f}" "<extra></extra>"),), row=1, col=1)
+
+    # Right: PDF, horizontal so it shares the y variable
+    fig.add_trace(go.Scatter(x=pdf, y=y_centers, mode="lines", fill="tozerox", name="PDF", hovertemplate=(y_label + ": %{y:.3g}<br>" "PDF: %{x:.3g}" "<extra></extra>")), row=1, col=2)
+
+    # Frames update the PDF and vertical line
+    frames = []
+
+    for i, time in enumerate(x_centers):
+
+        counts = H[i]
+
+        if counts.sum() > 0:
+            pdf_i = counts / (counts.sum() * y_widths)
+        else:
+            pdf_i = np.zeros_like(counts)
+
+        frames.append(go.Frame(name=str(i), data=[go.Scatter(x=pdf_i, y=y_centers)], traces=[1], layout=go.Layout(shapes=[dict(type="line", x0=time, x1=time, y0=0, y1=1, xref="x", yref="paper",
+                                                                                                                               line=dict(width=3, color="white"))])))
+
+    fig.frames = frames
+
+    # Slider
+    slider_steps = []
+
+    for i, time in enumerate(x_centers):
+
+        # Approximate absolute frame represented by this time bin
+        frame = int(round(time * fps))
+
+        slider_steps.append(dict(method="animate", args=[[str(i)], dict(mode="immediate", frame=dict(duration=0, redraw=True), transition=dict(duration=0))], label=str(frame)))
+
+    sliders = [
+        dict(
+            active=0,
+            currentvalue=dict(
+                prefix="Frame: ",
+                font=dict(size=14),
+            ),
+            pad=dict(t=50),
+            steps=slider_steps,
+        )
+    ]
+
+    # Initial vertical line
+    initial_shape = dict(
+        type="line",
+        x0=x_centers[0],
+        x1=x_centers[0],
+        y0=0,
+        y1=1,
+        xref="x",
+        yref="paper",
+        line=dict(
+            width=3,
+            color="white",
+        ),
+    )
+
+    fig.update_layout(
+        title=title,
+        sliders=sliders,
+        shapes=[initial_shape],
+        height=650,
+        width=1300,
+        template="plotly_white",
+        showlegend=False,
+    )
+
+    fig.update_xaxes(
+        title_text="Experiment time (s)",
+        row=1,
+        col=1,
+    )
+
+    fig.update_yaxes(
+        title_text=y_label,
+        row=1,
+        col=1,
+    )
+
+    fig.update_xaxes(
+        title_text="Probability density",
+        row=1,
+        col=2,
+    )
+
+    # Match y ranges exactly between panels
+    fig.update_yaxes(
+        range=[y_edges[0], y_edges[-1]],
+        row=1,
+        col=1,
+    )
+
+    fig.update_yaxes(
+        range=[y_edges[0], y_edges[-1]],
+        row=1,
+        col=2,
+    )
+
+    # Save as interactive HTML
+    save_dir = os.path.join(output_dir, f"hists_over_time/sliders/batch_{batch_num}")
+    os.makedirs(save_dir, exist_ok=True)
+
+    save_path = os.path.join(
+        save_dir,
+        f"{y_var}_{abs_frames[0]}_{abs_frames[-1]}_interactive.html",
+    )
+
+    fig.write_html(save_path)
+
+    print(f"Interactive histogram saved to {save_path}")
+
+    return fig
 
 
     

@@ -20,6 +20,8 @@ WORKDIR /app
 # Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# COPY src/intrinsic_calibration /app/intrinsic_calibration
+# RUN pip install -e /app/intrinsic_calibration
 
 # Copy all project files
 COPY . .

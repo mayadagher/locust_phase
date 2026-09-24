@@ -11,7 +11,8 @@
     "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/keypoints/,target=/keypoints,type=bind",
     "source=/Users/mayadagher/Documents/Locusts/hangar/tracking/mocap/,target=/mocap,type=bind",
     "source=/Users/mayadagher/Documents/Locusts/hangar/original/,target=/original,type=bind",
-    "source=/Users/mayadagher/Documents/Locusts/hangar/intrinsic_calibration/,target=/intrinsics,type=bind"
+    "source=/Users/mayadagher/Documents/Locusts/hangar/intrinsic_calibration/,target=/intrinsics,type=bind",
+    "source=/Users/mayadagher/Documents/Locusts/hangar/intrinsic_calibration/calibration_src/,target=/calibration_src,type=bind"
   ],
   "containerEnv": {
     "PYTHONPATH": "/calibration_src:/workspaces/project/src"

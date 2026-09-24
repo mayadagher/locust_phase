@@ -8,6 +8,8 @@ from scipy.spatial.distance import pdist
 from scipy.spatial import Voronoi
 from helper_fns import clip_voronoi_region
 from shapely.geometry import Polygon
+from joblib import Parallel, delayed
+from tqdm_joblib import tqdm_joblib
 
 
 from data_handling import *
@@ -31,17 +33,33 @@ def calculate_polarization(thetas):
     
     return polarization
 
+def calculate_nematic_order(thetas):
+    """
+    Calculates the nematic order of a group.
+    Returns 1.0 for perfect axial alignment and np.nan for an empty array.
+    """
+    if len(thetas) == 0:
+        return np.nan
+
+    # Double angles so opposite orientations are equivalent
+    sum_cos = np.sum(np.cos(2*thetas))
+    sum_sin = np.sum(np.sin(2*thetas))
+
+    nematic_order = np.sqrt(sum_cos**2 + sum_sin**2) / len(thetas)
+
+    return nematic_order
+
 def local_env(pos_valid_t:np.ndarray, thetas_valid_t:np.ndarray, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float):
 
     # Check if there are any valid positions
     if len(pos_valid_t) < 1:
         return np.array([]), np.array([])
 
-    # Create ball tree for valid positions
-    tree = BallTree(pos_valid_t)
-
     # Find neighbours
     if nbr_type == 'metric':
+
+        # Create ball tree for valid positions
+        tree = BallTree(pos_valid_t)
 
         # Find all ids within nbr_param of each other
         indcs = tree.query_radius(pos_valid_t, r = nbr_param) # list of arrays of neighbours that's n_valid_ids long
@@ -54,8 +72,11 @@ def local_env(pos_valid_t:np.ndarray, thetas_valid_t:np.ndarray, nbr_type:str, n
 
     elif nbr_type == 'topo':
 
+        # Create ball tree for valid positions
+        tree = BallTree(pos_valid_t)
+
         # Find all nbr_param-nearest neighbours for each valid id and their distances
-        dists, indcs = tree.query(pos_valid_t, k = nbr_param)
+        dists, indcs = tree.query(pos_valid_t, k = nbr_param + 1)
 
         # Remove self from indcs and dists lists
         indcs = [indcs[i][nbrs != i] for i, nbrs in enumerate(indcs)]
@@ -91,27 +112,30 @@ def local_env(pos_valid_t:np.ndarray, thetas_valid_t:np.ndarray, nbr_type:str, n
             vertices = vor.vertices[np.array(reg)[(np.array(reg) != -1).astype(bool)].astype(int)]
             poly = Polygon(clip_voronoi_region(vertices, arena_center, arena_radius, 0.05))
 
-            if poly.is_empty or poly.area < 200: # Area threshold is necessary due to invalid neighbourhoods
+            if poly.is_empty or poly.area < 9e-5: # Area threshold is necessary due to invalid neighbourhoods (200 for px, 9e-5 for m)
                 continue
 
             areas[i] = poly.area
 
-        density_valid_t = np.array([len(nbrs) for nbrs in indcs])/areas
+        density_valid_t = 1/areas
 
     else:
         raise ValueError(f"Invalid nbr_type: {nbr_type}. Must be one of 'metric', 'topo', or 'voronoi'.")
 
-    # Compute local polarization, EXCLUDING focal individual
+    # Compute local polarization and nematic order, EXCLUDING focal individual
     polarizations_valid_t = np.array([calculate_polarization(thetas_valid_t[nbrs]) for nbrs in indcs])
+    nematic_orders_valid_t = np.array([calculate_nematic_order(thetas_valid_t[nbrs]) for nbrs in indcs])
 
     # Remove individuals whose densities are invalid
-    polarizations_valid_t[np.isnan(density_valid_t)] = np.nan
+    invalid = np.isnan(density_valid_t)
+    polarizations_valid_t[invalid] = np.nan
+    nematic_orders_valid_t[invalid] = np.nan
 
-    return density_valid_t, polarizations_valid_t
+    return density_valid_t, polarizations_valid_t, nematic_orders_valid_t
 
-def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float, density_factor:float = 1):
+def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float, density_factor:float = 1, n_jobs:int = -1, chunk_size:int = 250):
     '''
-    Computes neighbour density and polarization locally.
+    Computes neighbour density, polarization, and nematic order locally.
     
     Parameters:
     ds: xr.Dataset containing 'centroid_x', 'centroid_y', 'theta'
@@ -134,26 +158,60 @@ def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, are
     # Prep results
     densities = np.full(thetas.shape, np.nan)
     polarizations = np.full(thetas.shape, np.nan)
+    nematic_orders = np.full(thetas.shape, np.nan)
 
-    # Iterate over frames
+    def process_frames(frame_indcs):
+        '''Compute local environments for a block of frames.'''
+
+        out = []
+
+        for f in frame_indcs:
+
+            # Select valid position and theta values for this frame
+            mask = valid_mask[f]
+            pos_valid_t = positions[:, f, mask].T
+            thetas_valid_t = thetas[f, mask]
+
+            if np.sum(mask) < 1:
+                result = None
+            else:
+                result = local_env(pos_valid_t, thetas_valid_t, nbr_type, nbr_param, arena_center, arena_radius)
+
+            out.append((f, mask, result))
+
+        return out
+
+    # Split frames into blocks to reduce multiprocessing overhead
     n_frames = positions.shape[1]
-    print('Compute local environments at each frame.')
-    for f in tqdm(range(n_frames)):
+    frame_chunks = [np.arange(start, min(start + chunk_size, n_frames)) for start in range(0, n_frames, chunk_size)]
 
-        # Find valid positions and thetas for this frame
-        pos_valid_t = positions[:, f, valid_mask[f]].T # (n_valid, 2)
-        thetas_valid_t = thetas[f, valid_mask[f]] # (n_valid, )
+    # Compute local environments iterating over chunks of frames in parallel
+    with tqdm_joblib(tqdm(desc='Compute local envs. (batches)', total=len(frame_chunks))):
+        results = Parallel(n_jobs=n_jobs, backend='loky')(delayed(process_frames)(chunk) for chunk in frame_chunks)
 
-        # Get densities and polarizations for valid ids
-        density_valid_t, polarizations_valid_t = local_env(pos_valid_t, thetas_valid_t, nbr_type, nbr_param, arena_center, arena_radius)
+    # Flatten worker outputs
+    results = [result for chunk in results for result in chunk]
 
-        # Update results
-        densities[f, valid_mask[f]] = density_valid_t*density_factor
-        polarizations[f, valid_mask[f]] = polarizations_valid_t
+    # Collect results in original frame order
+    for f, mask, result in results:
+
+        if result is None:
+            continue
+
+        # Check if there are sufficient arrays that are non-zero
+        if len(result) < 3 or np.sum([a.size == 0 for a in result]) > 0:
+            continue
+
+        density_t, polarization_t, nematic_order_t = result
+
+        densities[f, mask] = density_t*density_factor
+        polarizations[f, mask] = polarization_t
+        nematic_orders[f, mask] = nematic_order_t
     
     # Update ds
     ds[f'density_{nbr_type}_{nbr_param}'] = (('frame', 'id'), densities)
     ds[f'polarization_{nbr_type}_{nbr_param}'] = (('frame', 'id'), polarizations)
+    ds[f'nematic_order_{nbr_type}_{nbr_param}'] = (('frame', 'id'), nematic_orders)
 
     return ds
 

@@ -1,0 +1,4 @@
+model,status,n_parameters,n_points,n_pairs,train_rmse,train_median_error,cv_rmse,cv_median_error,cv_nrmse,cv_group_rmse_mean,cv_group_rmse_se,cv_folds_used
+linear,ok,4,182,1,0.09485331766811964,0.022878002185880163,,,,,,0
+similarity,ok,4,182,1,0.0021785663691608163,0.0007190885196162874,,,,,,0
+affine,ok,6,182,1,0.0021687197177879354,0.0007300251258583975,,,,,,0

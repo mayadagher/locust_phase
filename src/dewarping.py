@@ -22,25 +22,52 @@ def dewarp_pts(points:np.ndarray, calibration_path:str, frame_width:int = 7000, 
     if frame_width is not None and frame_height is not None:
         bundle = scale_calibration_bundle(bundle, frame_width, frame_height, allow_resolution_scaling=True)
 
-    # Convert image points to arena coordinates
+    # Convert image points to world coordinates
     points_dewarped = image_points_to_arena(points, bundle)
 
     return points_dewarped
 
-def dewarp_img(img:np.ndarray, calibration_path:str, frame_width:int = 7000, frame_height:int = 7000, arena_radius:float = 4.781/2):
-    ''' Dewarp an image and return matrices needed to plot dewarped points on top of the dewarped image.'''
+def dewarp_img(img:np.ndarray, calibration_path:str):
+    ''' Dewarp a distorted image and return matrices that transform points accordingly.
+    
+    D = distorted/raw camera pixels
+    U = undistorted camera pixels
+    W = arena/world coordinates, metres
+    O = pixels in your final rectified image
 
-    # STEP 1: Load calibration bundle and scale it to the desired frame width and height
+    rectified: O
+    world_bounds: W
+    px_per_m: W -> O
+    warp_matrix: U -> O
+    world_to_output: W -> O
+    '''
+
+    # STEP 1: Lens undistortion (D -> U)
+
+    # Load calibration bundle and scale it to the desired frame width and height
     bundle = CalibrationBundle.load_yaml(Path(calibration_path))
-    if frame_width is not None and frame_height is not None:
-        bundle = scale_calibration_bundle(bundle, frame_width, frame_height, allow_resolution_scaling=True)
+    
+    # Load arena_radius from calibration
+    with open(calibration_path, 'r') as f:
+        calib_dict = yaml.safe_load(f)
+        arena_diameter = calib_dict.get('arena_dimensions', {}).get('diameter_m')
+        if arena_diameter is not None:
+            arena_radius = arena_diameter / 2.0
+        else:
+            raise ValueError('arena_diameter not found in calibration YAML.')
 
-    # STEP 2: Undistort the image using the camera matrix and distortion coefficients from the calibration bundle
+    # Make sure calibration bundle is scaled to actual image size
+    frame_height, frame_width = img.shape[:2]
+    bundle = scale_calibration_bundle(bundle, frame_width, frame_height, allow_resolution_scaling=True)
+
+    # Undistort the image using the camera matrix and distortion coefficients from the calibration bundle
     camera_matrix = bundle.camera_matrix
     distortion_coeffs = bundle.distortion_coefficients
     undistorted_img = cv2.undistort(img, camera_matrix, distortion_coeffs, None, camera_matrix)
 
-    # STEP 3: Map the image corners (pixel coordinates) into arena/world coordinates
+    # STEP 2: Homography (U -> W)
+    
+    # Map the image corners (pixel coordinates) into arena/world coordinates
     corners_px_xy = np.array([[0.0, 0.0],
                               [float(frame_width), 0.0],
                               [float(frame_width), float(frame_height)],
@@ -56,7 +83,7 @@ def dewarp_img(img:np.ndarray, calibration_path:str, frame_width:int = 7000, fra
     corners_world_h = (H_px_to_m @ homogeneous).T  # (4,3)
     corners_world = corners_world_h[:, :2] / corners_world_h[:, 2:3]
 
-    # STEP 4: Determine the bounds of the rectified image in world coordinates
+    # STEP 3: World to output (W -> O)
 
     # Determine bounds that cover both the imaged region and the arena circle
     xmin_c, xmax_c = float(corners_world[:, 0].min()), float(corners_world[:, 0].max())
@@ -70,8 +97,6 @@ def dewarp_img(img:np.ndarray, calibration_path:str, frame_width:int = 7000, fra
     ymax = max(ymax_c, arena_radius + pad_m)
 
     world_bounds = {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax}
-
-    # STEP 5: Determine the scale factor from world coordinates to pixel coordinates for the rectified image
 
     # Use homography as an estimate of the scale factor, since it is a linear transformation
     H = np.array(bundle.to_dict()["H_undistorted_px_to_arena_m"], dtype=float)
@@ -89,13 +114,15 @@ def dewarp_img(img:np.ndarray, calibration_path:str, frame_width:int = 7000, fra
                                 [0.0, 0.0, 1.0]], 
                                 dtype=float)
 
+    # STEP 4: Undistorted pixels to output (U -> O)
+
     # Compute the warp matrix and apply the perspective transformation to the image
-    warp_matrix = world_to_output @ bundle.homography_px_to_m # Maps input pixels to output pixels
+    warp_matrix = world_to_output @ bundle.homography_px_to_m # Maps input (undistorted) pixels to output pixels
     rectified = cv2.warpPerspective(undistorted_img, warp_matrix, (output_width, output_height))
 
     return rectified, world_bounds, px_per_m, warp_matrix, world_to_output
 
-def dewarp_img_sequence(img_dir:str, calibration_path:str, start:int = 0, end:int = None, frame_width:int = 7000, frame_height:int = 7000, arena_radius:float = 4.781/2):
+def dewarp_img_sequence(img_dir:str, calibration_path:str, start:int = 0, end:int = None):
     '''Load and dewarp a sequence of images from a directory. Returns a list of dewarped images. start and end refer to the indices of the images in the directory.'''
 
     img_files = sorted([f for f in os.listdir(img_dir) if f.endswith(('.jpg', '.jpeg'))])
@@ -106,12 +133,12 @@ def dewarp_img_sequence(img_dir:str, calibration_path:str, start:int = 0, end:in
     rectified_images = []
     for img_file in tqdm(img_files, "De-warping images"):
         img = cv2.imread(os.path.join(img_dir, img_file))
-        rectified, world_bounds, px_per_m, warp_matrix, _ = dewarp_img(img, calibration_path, frame_width, frame_height, arena_radius)
+        rectified, world_bounds, px_per_m, warp_matrix, world_to_output = dewarp_img(img, calibration_path)
         rectified_images.append(rectified)
 
-    return rectified_images, world_bounds, px_per_m, warp_matrix
+    return rectified_images, world_bounds, px_per_m, warp_matrix, world_to_output
 
-def validate_dewarp(calibration_path:str, img_dir:str, ds:xr.Dataset, plot_dir:str, rel_idx:int = 0, frame_width:int = 7000, frame_height:int = 7000, arena_radius:float = 4.781/2):
+def validate_dewarp(calibration_path:str, img_dir:str, ds:xr.Dataset, plot_dir:str, rel_idx:int = 0):
     """
     Validate the dewarping of points and images using calibration data. ds should already be dewarped.
     """
@@ -124,7 +151,7 @@ def validate_dewarp(calibration_path:str, img_dir:str, ds:xr.Dataset, plot_dir:s
     img = cv2.imread(os.path.join(img_dir, img_files[abs_frame_idx]))
 
     # Dewarp the image
-    rectified, _, _, _, world_to_output = dewarp_img(img, calibration_path, frame_width, frame_height, arena_radius)
+    rectified, _, _, _, world_to_output = dewarp_img(img, calibration_path)
 
     # Apply transform, preserving NaNs (matrix mult with NaN yields NaN)
     pts_world = np.column_stack([ds.centroid_x.values[rel_idx, :], ds.centroid_y.values[rel_idx, :], np.ones(ds.centroid_x.values[rel_idx, :].shape[0])])
@@ -139,3 +166,34 @@ def validate_dewarp(calibration_path:str, img_dir:str, ds:xr.Dataset, plot_dir:s
     print(f'Dewarp validation plot saved to {plot_dir}dewarp_abs_frame_{abs_frame_idx}.png')
 
     return
+
+if __name__ == '__main__':
+
+    calibration_path = '/intrinsics/arena_board_calibration/calibration_official.yaml'
+    frame_width = 7000
+    frame_height = 7000
+
+    bundle = CalibrationBundle.load_yaml(Path(calibration_path))
+    bundle = scale_calibration_bundle(
+        bundle,
+        frame_width,
+        frame_height,
+        allow_resolution_scaling=True
+    )
+
+    H1 = np.asarray(bundle.homography_px_to_m, dtype=float)
+    H2 = np.asarray(
+        bundle.to_dict()["H_undistorted_px_to_arena_m"],
+        dtype=float
+    )
+
+    H1 = H1 / H1[2, 2]
+    H2 = H2 / H2[2, 2]
+
+    print("homography_px_to_m:")
+    print(H1)
+
+    print("H_undistorted_px_to_arena_m:")
+    print(H2)
+
+    print("max difference:", np.max(np.abs(H1 - H2)))
