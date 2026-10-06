@@ -2,31 +2,28 @@
 
 import numpy as np
 import xarray as xr
-import pynumdiff
-from scipy.signal import savgol_filter
-import scipy.signal
 import scipy
 import time
-import os
-import pandas as pd
 
-from data_handling import load_trex_data, save_ds
+from data_handling import save_ds, load_preprocessed_data
 
 '''_____________________________________________________COMPUTATION FUNCTIONS____________________________________________________________'''
 
-def interpolate_small_gaps(x, y, missing, max_gap=1, max_dist=0.5):
+def interpolate_small_gaps(x:np.ndarray, y:np.ndarray, missing:np.ndarray, max_gap:int=1, max_dist_m:float=0.02):
     """
     Conditionally interpolate NaN gaps in x,y trajectories.
     Only interpolate if the gap is shorter than `max_gap`
-    and the Euclidean distance across the gap is less than `max_dist`.
+    and the Euclidean distance across the gap is less than `max_dist_m`.
     """
+
+    # Load data
     x = np.array(x, copy=True)
     y = np.array(y, copy=True)
     missing = np.array(missing, copy = True)
     isnan = np.isnan(x) | np.isnan(y)
 
     if not np.any(isnan):
-        return x, y, missing  # nothing to do
+        return x, y, missing  # Nothing to do
 
     # Find start and end indices of NaN runs
     diffs = np.diff(np.concatenate([[0], isnan.astype(int), [0]]))
@@ -37,49 +34,27 @@ def interpolate_small_gaps(x, y, missing, max_gap=1, max_dist=0.5):
     for s, e in zip(starts, ends):
         s_idx += 1
         gap_size = e - s
-        # skip if at boundary
+        
+        # Skip if at boundary
         if s == 0 or e >= len(x):
             continue
 
+        # Compute distance across the gap
         dx = x[e] - x[s-1]
         dy = y[e] - y[s-1]
         dist_gap = np.sqrt(dx**2 + dy**2)
 
-        if gap_size <= max_gap and dist_gap <= max_dist:
+        if gap_size <= max_gap and dist_gap <= max_dist_m:
 
-            # Linear interpolate across this small gap
+            # Linearly interpolate across this small gap
             x[s:e] = np.linspace(x[s-1], x[e], gap_size + 2)[1:-1]
             y[s:e] = np.linspace(y[s-1], y[e], gap_size + 2)[1:-1]
-            missing[s:e] = 2 # Indicates interpolated values
+            missing[s:e] = 0 # Value no longer missing
 
     return x, y, missing
 
-def sg_window(x, window_length=7, polyorder=2, deriv=0, delta=1.0):
-    """Savitzky-Golay filter with corrected window length."""
-    n = len(x)
-    wl = min(window_length, n if (n % 2 == 1) else n - 1)
-    if wl < polyorder + 2:
-        wl = polyorder + 2
-    if wl % 2 == 0:
-        wl += 1
-    if wl > n:
-        wl = n if n % 2 == 1 else n - 1
-    x_hat = savgol_filter(x=x, window_length=wl, polyorder=polyorder, deriv=deriv, delta=delta, mode = 'interp')
-    
-    return x_hat
-
-def butter_zero_phase(x, dt=1, filter_order=2, cutoff_freq=0.5):
-    """Zero-phase Butterworth filter for 1D array (frame axis). Filtfilt passes filter over data backwards and forwards so that there is no time shift. Results in effectively lower cutoff frequency."""
-    n = len(x)
-    b, a = scipy.signal.butter(filter_order, cutoff_freq)
-
-    padlen = n - 1
-    x_hat = scipy.signal.filtfilt(b, a, x, axis=0, method="pad", padlen=padlen) # applies forward and backward pass so zero phase
-
-    return x_hat
-
-def spline_scipy(x, degree=2, s=0.5):
-    '''x is strictly contiguous.'''
+def spline_scipy(x:np.ndarray, degree:int=2, s:float=0.5):
+    '''Smooth using the scipy spline method. x is strictly contiguous.'''
 
     t = np.arange(len(x))
 
@@ -90,20 +65,23 @@ def spline_scipy(x, degree=2, s=0.5):
 
 def smooth_nantolerant(x: xr.DataArray, func, params: dict, min_tracklet_length: int):
     """Apply a smoothing function to a 1D array (frame axis) while tolerating NaNs."""
+
     x = np.asarray(x, dtype=float)
     out = np.full_like(x, np.nan)
-    valid = ~np.isnan(x)
+    valid = np.isfinite(x)
 
-    # Find contiguous segments of not-nan
+    # Find contiguous finite segments
     edges = np.diff(valid.astype(int))
     starts = np.where(edges == 1)[0] + 1
     ends = np.where(edges == -1)[0] + 1
 
+    # Add beginning/end if they too are valid
     if valid[0]:
         starts = np.r_[0, starts]
     if valid[-1]:
         ends = np.r_[ends, len(x)]
 
+    # Fit each contiguous segment separately
     for s, e in zip(starts, ends):
         seg = x[s:e]
         n = len(seg)
@@ -115,9 +93,10 @@ def smooth_nantolerant(x: xr.DataArray, func, params: dict, min_tracklet_length:
 
     return out
 
-def compute_speed(ds, speed_dict, fs: int = 5):
-    '''Compute speed using methods specified by speed_types (a dictionary with speed type as keys and parameter dictionaries as values). fs is sample frequency and is used to compute minimum tracklet length used for smoothing (or a tracklet will be excluded).'''
-    speed_types = list(speed_dict.keys())
+def compute_speed(ds:xr.Dataset, smooth_dict:dict, fs: float = 5):
+    '''Compute speed using methods specified by speed_types (a dictionary with speed type as keys and parameter dictionaries as values). 
+    fs is sample frequency and is used to compute minimum tracklet length and to convert units to /s from /frame.'''
+    speed_types = list(smooth_dict.keys())
 
     # Make this function more general
     if 'x_raw' not in ds:
@@ -127,67 +106,38 @@ def compute_speed(ds, speed_dict, fs: int = 5):
         x = ds['x_raw']
         y = ds['y_raw']
 
+    # Frame-coordinate spacing, expressed in seconds.
+    dt = ds['frame'].diff('frame') / fs
+
+    def speed_from_coords(x_coord, y_coord):
+        dx = x_coord.diff('frame')
+        dy = y_coord.diff('frame')
+        return np.hypot(dx, dy) / dt
+
     if 'raw' in speed_types: # Compute instantaneous speed from raw positions
-        ds['v_raw'] = np.hypot(x.diff(dim = 'frame'), y.diff(dim = 'frame'))
+        ds['v_raw'] = speed_from_coords(x, y)
 
-    if 'high_ord' in speed_types: # Compute high-order derivatives
-        high_ord_params = speed_dict['high_ord']
-        ds['x_high_ord'], vx_high_ord = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, x, input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
-        ds['y_high_ord'], vy_high_ord = xr.apply_ufunc(pynumdiff.finite_difference.finitediff, y, input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs=high_ord_params, dask = 'parallelized')
-        
-        # Get speed magnitude
-        ds['v_high_ord'] = np.hypot(vx_high_ord, vy_high_ord)
-
-    if 'moving_avg' in speed_types: # Compute moving average speed
-        moving_params = speed_dict['moving_avg']
-        ds['x_moving_avg'] = x.rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
-        ds['y_moving_avg'] = y.rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).mean()
-        ds['v_moving_avg'] = np.hypot(ds['x_moving_avg'].diff(dim='frame'), ds['y_moving_avg'].diff(dim='frame'))
-
-    if 'moving_med' in speed_types: # Compute moving median speed
-        moving_params = speed_dict['moving_med']
-        ds['x_moving_med'] = x.rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
-        ds['y_moving_med'] = y.rolling(frame=moving_params['window_length'], center=moving_params['center'], min_periods = 1).median()
-        ds['v_moving_med'] = np.hypot(ds['x_moving_med'].diff(dim='frame'), ds['y_moving_med'].diff(dim='frame'))
-
-    if 'sg' in speed_types: # Compute Savitzky-Golay smoothed speed
-        sg_params = speed_dict['sg']
-        min_tracklet_length = np.ceil(5*sg_params['window_length'])
-
-        # Smooth x and y (vectorized over ids)
-        ds['x_sg'] = xr.apply_ufunc(smooth_nantolerant, x, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs= {'func': sg_window, 'params': sg_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
-        ds['y_sg'] = xr.apply_ufunc(smooth_nantolerant, y, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs= {'func': sg_window, 'params': sg_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
-
-        # Speed magnitude
-        ds['v_sg'] = np.hypot(ds['x_sg'].diff(dim='frame'), ds['y_sg'].diff(dim='frame'))
-
-    if 'butter' in speed_types: # Compute Butterworth filtered speed
-        butter_params = speed_dict['butter']
-        # min_tracklet_length = np.ceil(10*fs/butter_params['cutoff_freq'])
-        min_tracklet_length = 50
-
-        ds['x_butter'] = xr.apply_ufunc(smooth_nantolerant, x, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize = True,  kwargs={'func': butter_zero_phase, 'params': butter_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
-        ds['y_butter'] = xr.apply_ufunc(smooth_nantolerant, y, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize = True,  kwargs={'func': butter_zero_phase, 'params': butter_params, 'min_tracklet_length': min_tracklet_length}, dask = 'parallelized')
-
-        # Speed magnitude
-        ds['v_butter'] = np.hypot(ds['x_butter'].diff(dim='frame'), ds['y_butter'].diff(dim='frame'))
 
     if 'spline' in speed_types: # Compute spline smoothed speed
-        spline_params = speed_dict['spline']
-        min_tracklet_length = 10*(spline_params['degree'] + 1)
+        print('Fitting spline')
+        spline_params = smooth_dict['spline']
+        print(spline_params)
+        # min_tracklet_length = 10*(spline_params['degree'] + 1)
+        # min_tracklet_length = 3*(spline_params['degree'] + 1)
+        min_tracklet_length = spline_params['degree'] + 1 # Minimum tracklet length for spline smoothing is degree + 1
 
         ds['x_spline'] = xr.apply_ufunc(smooth_nantolerant, x, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs={'func': spline_scipy, 'params': spline_params, 'min_tracklet_length': min_tracklet_length}, dask='parallelized')
         ds['y_spline'] = xr.apply_ufunc(smooth_nantolerant, y, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs={'func': spline_scipy, 'params': spline_params, 'min_tracklet_length': min_tracklet_length}, dask='parallelized')
 
         # Speed magnitude
-        ds['v_spline'] = np.hypot(ds['x_spline'].diff(dim='frame'), ds['y_spline'].diff(dim='frame'))
+        ds['v_spline'] = speed_from_coords(ds['x_spline'], ds['y_spline'])
 
     return ds
 
-def exclude_borders(ds, radius): # Sets missing = 1 for individuals outside a circular region and nan for all other variables
+def impose_borders(ds:xr.Dataset, arena_center_m:np.ndarray, arena_radius_m:float): 
+    '''Sets missing = 1 for individuals outside a circular region and nan for all other variables'''
     ds_copy = ds.copy()
-    center = (1920/2, 1920/2)
-    mask = (ds_copy['x_raw'] - center[0])**2 + (ds_copy['y_raw'] - center[1])**2 > radius**2 # mask for individuals outside of center
+    mask = (ds_copy['x_raw'] - arena_center_m[0])**2 + (ds_copy['y_raw'] - arena_center_m[1])**2 > arena_radius_m**2 # Mask out individuals outside of the arena
 
     # Set all data variables to np.nan where mask is True
     ds_copy = xr.where(mask, np.nan, ds_copy)
@@ -197,201 +147,109 @@ def exclude_borders(ds, radius): # Sets missing = 1 for individuals outside a ci
 
     return ds_copy
 
-def compute_tracklet_lengths_and_ids(missing_1d, fill_gaps):
-        """
-        Compute per-frame tracklet lengths and segment IDs for a 1D boolean array
-        indicating missing values.
+def compute_tracklet_lengths(missing_1d):
+    """
+    Compute per-frame tracklet lengths for a 1D boolean array indicating missing values.
 
-        Parameters
-        ----------
-        missing_1d : array-like of bool or nan
-            True = missing, False = valid (or NaN treated as missing)
+    Parameters
+    ----------
+    missing_1d : array-like of bool or nan
+        True = missing, False = valid (or NaN treated as missing)
 
-        Returns
-        -------
-        lengths : np.ndarray
-            Array of same shape as input; contains the total length of each
-            contiguous valid segment, NaN where missing.
-        segment_ids : np.ndarray
-            Array of same shape; each valid segment gets a unique integer ID (1, 2, ...),
-            and NaN where missing.
-        """
+    Returns
+    -------
+    lengths : np.ndarray
+        Array of same shape as input; contains the total length of each
+        contiguous valid segment, NaN where missing.
+    """
 
-        missing_1d = np.array(missing_1d, copy = True)
-        missing_1d[np.isnan(missing_1d)] = 1  # Treat NaNs as missing
-        missing_1d[missing_1d == 2] = 1 - int(fill_gaps) # Interpolated values are treated as present if fill_gaps is True, otherwise they're treated as absent
-        present = ~missing_1d.astype(bool)
+    # Prepare valid array
+    missing_1d = np.array(missing_1d, copy = True)
+    missing_1d[np.isnan(missing_1d)] = 1  # Treat NaNs as missing
+    present = ~missing_1d.astype(bool)
 
-        n = len(present)
-        lengths = np.full(n, np.nan)
-        segment_ids = np.full(n, np.nan)
+    n = len(present)
+    lengths = np.full(n, np.nan)
 
-        # Detect where new present segments start (False → True transition)
-        starts = present & ~np.roll(present, 1)
-        starts[0] = present[0]
+    # Detect where new present segments start (False → True transition)
+    starts = present & ~np.roll(present, 1)
+    starts[0] = present[0]
 
-        # Assign segment IDs (increment when a new present block starts)
-        seg_id = np.cumsum(starts)
-        seg_id[~present] = 0  # keep missing as 0
-        unique_ids, counts = np.unique(seg_id[seg_id > 0], return_counts=True)
+    # Assign segment IDs (increment when a new present block starts)
+    seg_id = np.cumsum(starts)
+    seg_id[~present] = 0  # keep missing as 0
+    unique_ids, counts = np.unique(seg_id[seg_id > 0], return_counts=True)
 
-        # Map each segment ID to its length
-        seg_len_map = np.zeros(seg_id.max() + 1, dtype=float)
-        seg_len_map[unique_ids] = counts
+    # Map each segment ID to its length
+    seg_len_map = np.zeros(seg_id.max() + 1, dtype=float)
+    seg_len_map[unique_ids] = counts
 
-        # Fill in lengths and segment IDs where valid
-        lengths[present] = seg_len_map[seg_id[present]]
-        segment_ids[present] = seg_id[present]
+    # Fill in lengths where valid
+    lengths[present] = seg_len_map[seg_id[present]]
 
-        # Convert missing entries back to NaN
-        segment_ids[~present] = np.nan
-        lengths[~present] = np.nan
+    # Convert missing entries back to NaN
+    lengths[~present] = np.nan
 
-        return lengths, segment_ids
+    return lengths
 
-def compute_theta(ds, spline_dict):
-    """Compute heading direction and angular velocity."""
+def preprocess_ds(ds:xr.Dataset, smooth_dict:dict, fill_gaps:bool, interp_dict:dict | None = None, center_only:bool = True, arena_center_m:np.ndarray | None = None, arena_radius_m:float | None = None, fs:float = 5):
+    '''Preprocess a (dewarped) dataset.'''
 
-    def wrap(seg):
-        """Wrap angles to [-pi, pi)."""
-        return (seg + np.pi) % (2 * np.pi) - np.pi
-
-    def smooth_theta_segment(seg, degree:int, s:float):
-        """Unwrap → smooth → return unwrapped (segment-wise)."""
-        seg_unwrapped = np.unwrap(seg)
-        seg_smoothed = spline_scipy(seg_unwrapped, degree=degree, s=s)
-        return seg_smoothed
-
-    # Raw heading (wrapped)
-    theta = np.arctan2(ds[f'y_spline'].diff("frame"), ds[f'x_spline'].diff("frame")).reindex({"frame": ds.frame})
-
-    # Smooth theta (segment-wise unwrap handled internally)
-    theta_unwrapped_smooth = xr.apply_ufunc(smooth_nantolerant, theta, input_core_dims=[["frame"]], output_core_dims=[["frame"]], vectorize=True, dask="allowed", output_dtypes=[float], kwargs={"func": smooth_theta_segment,
-                             "params": spline_dict, "min_tracklet_length": 1})
-
-    # Angular velocity
-    ds[f"vtheta_spline"] = xr.apply_ufunc(np.diff, theta_unwrapped_smooth, input_core_dims=[["frame"]], output_core_dims=[["frame"]], vectorize=True, dask="allowed", output_dtypes=[float], kwargs={"prepend": np.nan})
-
-    # Wrap back to [-pi, pi)
-    ds[f"theta_spline"] = wrap(theta_unwrapped_smooth)
-
-    return ds
-
-def compute_dist_from_center(ds, center=(1920/2, 1920/2)):
-    ''' Compute distance from center for each individual at each frame using high_ord smoothed positions.'''
-    ds_copy = ds.copy()
-    ds_copy['dist_from_center'] = np.hypot(ds_copy['y_high_ord'] - center[1], ds_copy['x_high_ord'] - center[0])
-    return ds_copy
-
-def preprocess_raw(ds, speed_dict, fill_gaps = False, interp_dict = None, center_only = False, radius = None):
-    ''' Interpolates and computes speed, excludes borders, computes tracklet lengths, and gives tracklets identities. Arguably, repeatedly computing speed/interpolating is wasteful if we want to compare
-    effects of excluding borders on tracklet lengths, but I can easily split this function later if needed.
-    '''
-    ds['missing'] = xr.where(np.isnan(ds['missing']), 1, ds['missing']) # 1: missing, 0: present
-
-    # Interpolate gaps
+    # STEP 1: Exclude detections outside of the arena
     t1 = time.time()
-    if fill_gaps:
-        ds_interpolated = xr.apply_ufunc(interpolate_small_gaps, ds['x_raw'], ds['y_raw'], ds['missing'], input_core_dims=[['frame'], ['frame'], ['frame']], output_core_dims=[['frame'], ['frame'], ['frame']], 
-                                         vectorize=True, kwargs=interp_dict, dask='allowed', output_dtypes=[float, float, float])
-
-        ds['x_raw'], ds['y_raw'], ds['missing'] = ds_interpolated # 'missing' value for interpolated points is 2
-    t2 = time.time()
-    print('Time to interpolate gaps:', round(t2 - t1, 3))
-
-    # Compute speed
-    ds = compute_speed(ds, speed_dict)
-    t3 = time.time()
-    print('Time to compute speed:', round(t3 - t2, 3))
-
-    # Exclude borders
     if center_only:
-        ds = exclude_borders(ds, radius)
-    t4 = time.time()
-    print('Time to exclude borders:', round(t4 - t3, 3))
 
-    # Compute tracklet lengths and assign them IDs
-    tracklet_lengths, tracklet_ids = xr.apply_ufunc(compute_tracklet_lengths_and_ids, ds['missing'], input_core_dims=[['frame']], output_core_dims=[['frame'], ['frame']], kwargs={'fill_gaps': fill_gaps}, vectorize=True, dask='allowed', output_dtypes=[float, float])
+        ds = impose_borders(ds, arena_center_m, arena_radius_m)
 
+        t2 = time.time()
+        print(f'Detections outside of the arena excluded in {(t2 - t1):.2f} s.')
+        t1 = t2
+
+    # STEP 2: Interpolate gaps
+    
+    if fill_gaps:
+        interpolated_arrs = xr.apply_ufunc(interpolate_small_gaps, ds['x_raw'], ds['y_raw'], ds['missing'], input_core_dims=[['frame'], ['frame'], ['frame']], 
+                                           output_core_dims=[['frame'], ['frame'], ['frame']], vectorize=True, kwargs=interp_dict, dask='allowed', output_dtypes=[float, float, float])
+
+        ds['x_raw'], ds['y_raw'], ds['missing'] = interpolated_arrs
+    
+        t2 = time.time()
+        print(f'Tracklets interpolated in {(t2 - t1):.2f} s.')
+        t1 = t2
+
+    # STEP 3: Compute velocities
+
+    ds = compute_speed(ds, smooth_dict, fs)
+
+    t2 = time.time()
+    print(f'Speed computed in {(t2 - t1):.2f} s.')
+    t1 = t2
+
+    # STEP 4: Compute tracklet lengths
+
+    tracklet_lengths = xr.apply_ufunc(compute_tracklet_lengths, ds['missing'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, dask='allowed', output_dtypes=[float])   
     ds['tracklet_length'] = tracklet_lengths
-    ds['tracklet_id'] = tracklet_ids
 
-    t5 = time.time()
-    print('Time to compute tracklet lengths and IDs:', round(t5 - t4, 3))
+    t2 = time.time()
+    print(f'Tracklet lengths computed in {(t2 - t1):.2f} s.')
 
-    # Compute orientations and angular speed
-    # ds = compute_theta(ds, speed_dict)
-    # t6 = time.time()
-    # print('Time to compute orientations and angular speed:', round(t6 - t5, 3))
-
-    # Compute distance from center
-    # ds = compute_dist_from_center(ds)
-    # t7 = time.time()
-    # print('Time to compute distance from center:', round(t7 - t6, 3))
     return ds
 
-def load_and_preprocess(batch_num:int, exp_name:str, speed_dict:dict, fill_gaps:bool, interp_dict:dict, center_only:bool, radius:int, load_num_ids:int = None):
-    ''' Load raw data for a batch number and preprocess it.'''
-    num_ids, ds_raw = load_trex_data(batch_num, exp_name, load_num_ids)
-    print('TRex data loaded. Number of IDs:', num_ids)
+def preprocess_and_save_all_batches(n_batches:int, h5_dir:str, smooth_dict:dict, fill_gaps:bool, interp_dict:dict | None = None, center_only:bool = True, arena_center_m:np.ndarray | None = None, arena_radius_m:float | None = None, fs:float = 5):
 
-    ds = preprocess_raw(ds_raw, speed_dict, fill_gaps=fill_gaps, interp_dict=interp_dict, center_only=center_only, radius=radius)
-    print('Data pre-processed.')
+    # Iterate over batches
+    for i in range(n_batches):
 
-    return ds, num_ids
+        # Load unprocessed .h5 file
+        ds_name = f'{h5_dir}/batch_{i}_5.0Hz'
+        ds = load_preprocessed_data(ds_name + '.hdf5')
 
-def preprocess_save_all_batches(exp_name:str, num_batches:int, speed_dict:dict, fill_gaps:bool, interp_dict:dict, center_only:bool, radius:int, reprocess:bool = False):
-    ''' Preprocess all batches and save them.'''
+        # Preprocess ds
+        ds = preprocess_ds(ds, smooth_dict, fill_gaps, interp_dict, center_only, arena_center_m, arena_radius_m, fs)
 
-    for batch_i in range(num_batches):
-        # Define folder path
-        folder_path = f'/output/preprocessed/{exp_name}/batch_{batch_i}'
-        
-        # Check if folder exists, create if not
-        os.makedirs(folder_path, exist_ok=True)
+        # Save ds
+        params = {'smooth_dict': smooth_dict, 'fill_gaps': fill_gaps, 'interp_dict': interp_dict, 'center_only': center_only, 'radius': arena_radius_m, 'speed_units': 'm/s', 'done_by': 'maya_dagher'}
+        save_ds(ds, ds_name, params)
 
-        # Check if preprocessed data file exists
-        data_file_path = f'{folder_path}/traj_data.h5'
-        exists = os.path.exists(data_file_path)
-
-        if not exists or reprocess:
-            print(f'Preprocessing data for batch {batch_i}.')
-
-            ds, _ = load_and_preprocess(batch_i, exp_name, speed_dict, fill_gaps, interp_dict, center_only, radius)
-
-            # SAVE DATA
-            params = {'speed_dict': speed_dict, 'fill_gaps': fill_gaps, 'interp_dict': interp_dict, 'center_only': center_only, 'radius': radius}
-            save_ds(ds, data_file_path, params)
-            print(f'Data for batch {batch_i} saved.\n')
-
-            del ds
-
-# Try to isolate discontinuities by looking at angular speed (to make sure tracklets are actually just one individual)
-
-def reduced_ds(output_path:str, exp_name:str, batch_num:int, speed_dict:dict, fill_gaps:bool, interp_dict:dict, center_only:bool, radius:int):
-    '''Return minimally preprocessed dataset included x, y, vx, and vy for a subset of smoothing methods.'''
-
-    print(f'Minimally preprocessing data for batch {batch_num}.')
-
-    # Do full preprocess
-    ds, _ = load_and_preprocess(batch_num, exp_name, speed_dict, fill_gaps, interp_dict, center_only, radius)
-
-    # Remove unnecessary data variables
-    vars = []
-    for smooth in speed_dict.keys():
-        if smooth != 'raw':
-            vars.extend([f'x_{smooth}', f'y_{smooth}'])
-    ds = ds[vars]
-
-    # Get vx, vy from simple differentiation
-    for smooth in speed_dict.keys():
-        if smooth != 'raw':
-            ds[f'vx_{smooth}'] = ds[f'x_{smooth}'].diff(dim='frame')
-            ds[f'vy_{smooth}'] = ds[f'y_{smooth}'].diff(dim='frame')
-
-    # SAVE DATA
-    params = {'speed_dict': speed_dict, 'fill_gaps': fill_gaps, 'interp_dict': interp_dict, 'center_only': center_only, 'radius': radius}
-    save_ds(ds, output_path, params)
-    print(f'Data for batch {batch_num} saved.\n')
-
-    del ds
+        # Manage memory
+        del ds

@@ -10,30 +10,36 @@ from tqdm import tqdm
 import csv
 from dewarping import dewarp_pts
 '''_____________________________________________________LOAD AND SAVE FUNCTIONS____________________________________________________________'''
-def load_trex_data(batch_num:int, file_name:str, load_num_ids:int | None = None):
+def load_trex_data(batch_num:int, exp_name:str, calibration_path:str | None = None, frame_height:int = 7000, frame_width:int = 7000, load_num_ids:int | None = None, scale_factor:int = 1920):
     """
     Load TReX .npz data into an xarray.Dataset.
     
     Dimensions: id × frame
     Coordinates: 'id', 'frame'
     Data variables: x_raw, y_raw, (speed, id_prob, num_pixels,) missing
+
+    batch_num: Data was saved into batches. This index points to which batch you're loading.
+    file_name: Prefix to identity index in .npz files saved by TReX.
+    calibration_path: Path to calibration data. Optionally calibrate data directly as you load it.
+    frame_height, frame_width: Used for scaling the calibration. Should correspond to the original dimensions of the video data.
+    load_num_ids: Optionally load fewer ids for testing.
     """
 
     assert load_num_ids is None or load_num_ids > 0, "load_num_ids must be a positive integer."
 
-    data_dir = f'/bb/trex_outputs/batch_{batch_num}/data/'
+    data_dir = f'/bb/{exp_name}/trex_outputs/batch_{batch_num}/data/'
     num_ids = len(os.listdir(data_dir))
     ids = np.arange(num_ids) if load_num_ids is None else np.arange(load_num_ids)
 
     datasets = []
-    for i in ids:
-        path = os.path.join(data_dir, f"{file_name}_id{i}.npz")
+    for i in tqdm(ids, 'Saving ids from TReX files'):
+        path = os.path.join(data_dir, f"{exp_name}_id{i}.npz")
         with np.load(path) as d:
             frames = d['frame']
             ds = xr.Dataset(
                 {
-                    'x_raw': (['frame'], d['X#wcentroid']),
-                    'y_raw': (['frame'], d['Y#wcentroid']),
+                    'x_raw': (['frame'], d['X#wcentroid']*frame_width/scale_factor),
+                    'y_raw': (['frame'], d['Y#wcentroid']*frame_height/scale_factor),
                     'missing': (['frame'], d['missing']),
                 },
                 coords={'frame': frames, 'id': i},
@@ -43,8 +49,20 @@ def load_trex_data(batch_num:int, file_name:str, load_num_ids:int | None = None)
     # Concatenate along 'id' dimension
     full_ds = xr.concat(datasets, dim='id', join = 'outer')
     full_ds = full_ds.where(np.isfinite(full_ds), np.nan)
+
+    # Reshape data in order to de-warp all points at once (for efficiency)
+    centroids = np.column_stack([full_ds['x_raw'].values.ravel(), full_ds['y_raw'].values.ravel()])
+
+    if calibration_path is not None:
+
+        # De-warp data
+        centroids = dewarp_pts(centroids, calibration_path, frame_width, frame_height)
+
+        # Correct data
+        full_ds['x_raw'] = (('frame', 'id'), centroids[:, 0].reshape(full_ds['x_raw'].shape).T)
+        full_ds['y_raw'] = (('frame', 'id'), centroids[:, 1].reshape(full_ds['y_raw'].shape).T)
     
-    return len(ids), full_ds
+    return full_ds
 
 def load_preprocessed_data(load_name:str): # Load pre-processed data from h5s
     """
@@ -54,6 +72,7 @@ def load_preprocessed_data(load_name:str): # Load pre-processed data from h5s
     return ds.load()
 
 def save_ds(ds:xr.Dataset, save_name:str, params:dict | None): # Save pre-processed data to h5s
+    '''Save xarray data into an hdf5 file and some parameter info into a json file. save_name should not have a file type at the end of it.'''
 
     # Save float64 variables as float32 to save space
     for var in ds.data_vars:
@@ -65,9 +84,9 @@ def save_ds(ds:xr.Dataset, save_name:str, params:dict | None): # Save pre-proces
 
     # Compress and save
     encoding = {var: {'compression': 'gzip', 'compression_opts': 4} for var in ds.data_vars}
-    ds.to_netcdf(save_name, engine="h5netcdf", encoding=encoding)
+    ds.to_netcdf(save_name + '.hdf5', engine="h5netcdf", encoding=encoding)
 
-    params_out = Path(save_name.split('.')[0] + '_params')
+    params_out = Path('/'.join(save_name.split('/')[:-1]) +'/params/' + save_name.split('/')[-1])
     params_out.with_suffix(".json").write_text(json.dumps(params, indent=2, sort_keys=True))
 
     print('Saved dataset to', save_name)
@@ -266,7 +285,6 @@ def kp_detections_to_xr(h5_path:str, calibration_path:str | None = None, frame_w
     full_ds = xr.concat(datasets, dim='frame', join='outer')
 
     # Reshape data in order to de-warp all points at once (for efficiency) and compute theta.
-    # Flatten in the same order for x and y so each pair stays associated with the same detection.
     centroids = np.column_stack([full_ds['centroid_x'].values.ravel(), full_ds['centroid_y'].values.ravel()])
     heads = np.column_stack([full_ds['head_x'].values.ravel(), full_ds['head_y'].values.ravel()])
     tails = np.column_stack([full_ds['tail_x'].values.ravel(), full_ds['tail_y'].values.ravel()])
@@ -296,60 +314,6 @@ def kp_detections_to_xr(h5_path:str, calibration_path:str | None = None, frame_w
         full_ds = full_ds.drop_vars(['head_x', 'head_y', 'tail_x', 'tail_y'])
 
     return full_ds
-
-# def kp_detections_to_xr(h5_path:str, calibration_path:str, frame_width:int = 7000, frame_height:int = 7000,start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, rescale_factor:float = 1, keep_kps:bool = False):
-#     """
-#     Convert keypoint detections from HDF5 to xarray Dataset. De-warp detections using calibration bundle. Rescale coordinates if needed (from downsampled image, etc.).
-#     """
-
-#     if end_frame is None:
-#         with h5py.File(h5_path, 'r') as f:
-#             end_frame = len(f.keys())
-
-#     datasets = []
-#     with h5py.File(h5_path, 'r') as f:
-#         for f_idx in tqdm(range(start_frame, end_frame, subsample)):
-
-#             # Get centroids, heads, tails from HDF5
-#             centroids = f[f'f{f_idx}']['centroid']
-#             heads = f[f'f{f_idx}']['head']
-#             tails = f[f'f{f_idx}']['tail']
-
-#             # Transform points from image coordinates to arena coordinates using calibration bundle
-#             centroids = dewarp(centroids, calibration_path, frame_width, frame_height)
-#             heads = dewarp(heads, calibration_path, frame_width, frame_height)
-#             tails = dewarp(tails, calibration_path, frame_width, frame_height)
-
-#             # Compute theta (orientation) from head and tail positions
-#             theta = np.arctan2(heads[:, 1] - tails[:, 1], heads[:, 0] - tails[:, 0])
-
-#             if keep_kps:
-#                 ds = xr.Dataset(
-#                     {
-#                         'centroid_x': (['id'], centroids[:, 0]*rescale_factor),
-#                         'centroid_y': (['id'], centroids[:, 1]*rescale_factor),
-#                         'theta': (['id'], theta),
-#                         'head_x': (['id'], heads[:, 0]),
-#                         'head_y': (['id'], heads[:, 1]),
-#                         'tail_x': (['id'], tails[:, 0]),
-#                         'tail_y': (['id'], tails[:, 1]),
-#                     },
-#                     coords={'id': np.arange(len(centroids)), 'frame': f_idx},
-#                 )
-#             else:
-#                 ds = xr.Dataset(
-#                     {
-#                         'centroid_x': (['id'], centroids[:, 0]*rescale_factor),
-#                         'centroid_y': (['id'], centroids[:, 1]*rescale_factor),
-#                         'theta': (['id'], theta),
-#                     },
-#                     coords={'id': np.arange(len(centroids)), 'frame': f_idx},
-#                 )
-#             datasets.append(ds)
-
-#     full_ds = xr.concat(datasets, dim='frame', join='outer')
-    
-#     return full_ds
 
 def cluster_stats_to_h5(aggregated: dict[int, list], output_path: str):
     """

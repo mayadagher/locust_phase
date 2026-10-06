@@ -6,6 +6,7 @@ from keypoints import *
 from phase import *
 from visualize_phase import *
 from animate import *
+from sliders import *
 from cluster_analysis import *
 
 import numpy as np
@@ -27,7 +28,7 @@ yolo_version = 'yolo26n-pose.pt'
 img_sz = 640
 
 # Keypoints path
-h5_kp='/keypoints/20230329_processed_complete.hdf5'
+h5_kp='/keypoints/20230329/kp_processed_complete.hdf5'
 n_kp_batches = 5
 total_frames = 60466
 batch_len = np.ceil(total_frames/n_kp_batches).astype(int)
@@ -45,7 +46,7 @@ occ_path = f'/keypoints/20230329_{n_layers}_{n_ang0}_{r_max}_{n_focals}.hdf5'
 arena_center_px_warped =  np.array([3767.15, 3767.15]) # px, found using define_boundary
 arena_radius_px_warped = 3395.79 # px, found using define_boundary
 
-'''Recent results from define_boudnary (post-dewarping):
+'''Recent results from define_boundary (post-dewarping):
 Estimated arena center (pixels): (3778.48, 3769.63), radius: 3467.80
 Estimated arena center (world units): (0.01, -0.00), radius: 2.38'''
 arena_center_px_dewarped = np.array([3778.48, 3769.63])
@@ -55,7 +56,7 @@ arena_radius_m = 2.38
 
 # Loading parameters
 exp_name = '20230329'
-batch_idx = 2
+batch_idx = 4
 subsample = 1
 
 # Visualizing and animating parameters
@@ -95,20 +96,20 @@ if __name__ == "__main__":
     # DEWARP KEYPOINTS
     # ds = kp_detections_to_xr(h5_kp, calibration_path, frame_width=frame_width, frame_height=frame_height, start_frame=batch_idx*batch_len, end_frame=min((batch_idx+1)*batch_len, total_frames - 1), subsample=subsample)
     
-    # ds = load_preprocessed_data(f'/keypoints/dewarped/20230329_preprocessed_complete_dewarped_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5')
+    # ds = load_preprocessed_data(f'/keypoints/dewarped/20230329/preprocessed_dewarped_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5')
 
     # VALIDATE DEWARPING OF KEYPOINTS AND IMAGES
     # validate_dewarp(calibration_path, img_dir, ds, plots_path, rel_idx = 0, frame_width = frame_width, frame_height = frame_height)
 
     # SAVE DEWARPED DATASET
-    # save_ds(ds, f'/keypoints/dewarped/20230329_preprocessed_complete_dewarped_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5', None)
+    # save_ds(ds, f'/keypoints/dewarped/20230329/preprocessed_dewarped_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5', None)
 
 
 
 
     # LOOK AT PHASE
     
-    h5_prep = f'/keypoints/dewarped/20230329_preprocessed_complete_dewarped_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5'
+    h5_prep = f'/keypoints/20230329/dewarped/preprocessed_dewarped_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5'
     ds = load_preprocessed_data(h5_prep)
     # print(ds)
     # ds = get_local_env(ds, 'metric', 100) # 2 BL
@@ -116,7 +117,7 @@ if __name__ == "__main__":
     # ds = get_local_env(ds, 'voronoi', None, arena_center_m, arena_radius_m, density_factor = 1, n_jobs = 6)
     # ds = get_local_env(ds, 'metric', 400) # 8 BL
     # ds = get_local_env(ds, 'metric', 500) # 10 BL
-    # save_ds(ds, f'/keypoints/dewarped/20230329_preprocessed_complete_dewarped_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5', None)
+    # save_ds(ds, f'/keypoints/20230329/dewarped/preprocessed_dewarped_batch_{batch_idx}_{round(5/subsample, 2)}Hz.hdf5', None)
     # plot_phase(ds, 'density_metric_100', 'polarization_metric_100', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 2 BL', gridsize = 30, x_factor = px_to_cm)
     # plot_phase(ds, 'density_metric_200', 'polarization_metric_200', plots_path, [r'Local density $(/cm^2)$', 'Polarization'], 'Locality: 4 BL', gridsize = 30, x_factor = px_to_cm)
     # plot_phase(ds, 'density_metric_300', 'polarization_metric_300', plots_path, [r'Local density $(/m^2)$', 'Polarization'], 'Locality: 6 BL', gridsize = 30, x_factor = px_to_m)
@@ -141,11 +142,19 @@ if __name__ == "__main__":
     # plot_distribution_over_time(ds, 'polarization_voronoi_None', 'Polarization', plots_path, '', y_factor = 1, start_frame = 0, end_frame = 3000, subsample = 5)
     # plot_distribution_over_time(ds, 'theta', 'Orientation', plots_path, '', y_factor = 1, start_frame = 8000, end_frame = 11000, subsample = 5)
 
-    plot_distribution_over_time_interactive(ds, 'density_voronoi_None', 'Local density (㎡)', plots_path, '', batch_idx, y_factor = 1, start_frame = 9000, end_frame = 12000, y_quant = 0.95, subsample = 5)
-    plot_distribution_over_time_interactive(ds, 'nematic_order_voronoi_None', 'Nematic order', plots_path, '', batch_idx, y_factor = 1, start_frame = 9000, end_frame = 12000, subsample = 5)
-    plot_distribution_over_time_interactive(ds, 'polarization_voronoi_None', 'Polarization', plots_path, '', batch_idx, y_factor = 1, start_frame = 9000, end_frame = 12000, subsample = 5)
-    plot_distribution_over_time_interactive(ds, 'theta', 'Orientation', plots_path, '', batch_idx, y_factor = 1, start_frame = 9000, end_frame = 12000, subsample = 5)
+    # plot_distribution_over_time_interactive(ds, 'density_voronoi_None', 'Local density (/㎡)', plots_path, '', batch_idx, y_factor = 1, start_frame = 9000, end_frame = 12000, y_quant = 0.95, subsample = 5)
+    # plot_distribution_over_time_interactive(ds, 'nematic_order_voronoi_None', 'Nematic order', plots_path, '', batch_idx, y_factor = 1, start_frame = 9000, end_frame = 12000, subsample = 5)
+    # plot_distribution_over_time_interactive(ds, 'polarization_voronoi_None', 'Polarization', plots_path, '', batch_idx, y_factor = 1, start_frame = 9000, end_frame = 12000, subsample = 5)
+    # plot_distribution_over_time_interactive(ds, 'theta', 'Orientation', plots_path, '', batch_idx, y_factor = 1, start_frame = 9000, end_frame = 12000, subsample = 5)
     
+    # plot_distribution_over_position_interactive(ds, 'density_voronoi_None', plots_path, batch_idx, start_frame = 0, end_frame = 3000, z_label = 'Voronoi density (/㎡)', value_quantile = 0.95)
+    # plot_position_histograms_interactive(ds, plots_path, batch_idx, start_frame = 0, end_frame = 3000)
+    # plot_reflection_aligned_position_distributions(ds, plots_path, batch_idx)
+
+    # plot_voronoi_overlay(ds, 0, arena_center_m, arena_radius_m, plot = True)
+
+    plot_reflection_aligned_variable_distributions(ds, 'theta', 'Orientation', 'centroid_x', 'centroid_y', plots_path, batch_idx, arena_center_m, arena_radius_m)
+
     # interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center_m, arena_radius_m, start_frame = 0, end_frame = 100, subsample = 1, cmap = 'viridis')
     # interactive_voronoi_overlay(ds, 'density_voronoi_None', plots_path, arena_center_m, arena_radius_m, start_frame = 0, end_frame = 1000, subsample = 20, cmap = 'viridis')
 

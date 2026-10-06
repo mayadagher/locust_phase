@@ -20,3 +20,13 @@ __pycache__/
 
 # Ignore calibration folder
 src/intrinsic_calibration/
+
+# Ignore trajectory registration folders
+trajectory_registration_output_dewarped_mocap_batch_0049
+trajectory_registration_output_dewarped_mocap_batch_0049_informative
+trajectory_registration_output_dewarped_mocap_batch_0050
+trajectory_registration_output_dewarped_mocap_batch_0051
+trajectory_registration_output_dewarped_mocap_batch_0052
+
+# Ignore registration text file
+sparse_trajectory_registration_notes.txt

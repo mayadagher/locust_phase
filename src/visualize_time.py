@@ -4,13 +4,14 @@ import numpy as np
 import xarray as xr
 import h5py
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 from data_handling import load_preprocessed_data
 from helper_fns import *
 
 '''_____________________________________________________PLOTTING FUNCTIONS____________________________________________________________'''
 
-def bb_vs_kp_detections_over_time(bb_h5:str, kp_preprocessed_h5:str, plot:bool=False):
+def bb_vs_kp_detections_over_time(bb_h5:str, kp_preprocessed_h5:str, plot:bool=False, plots_path:str | None = None):
     bb_detections = []
     with h5py.File(bb_h5, 'r') as f:
         for i in range(1, len(f.keys()) + 1):
@@ -29,27 +30,27 @@ def bb_vs_kp_detections_over_time(bb_h5:str, kp_preprocessed_h5:str, plot:bool=F
         plt.legend()
         plt.xlabel('Frame', fontsize=17)
         plt.ylabel('Number of detections', fontsize=17)
-        plt.savefig('./plots/20230329/all/detections_over_time.png')
+        plt.savefig(f'{plots_path}detections_over_time.png')
 
     return bb_detections, kp_detections
 
-def tracklets_over_time(speed_name:str, num_batches:int, exp_name:str, num_detections:list):
+def tracklets_over_time(smooth_name:str, num_batches:int, h5_in:str, num_detections:list, output_dir:str):
     """
-    Calculate the number of tracklets over all batches based on the specified speed variable. Batches have some overlap in time.
+    Calculate the number of tracklets over all batches based on the specified smooth variable. Batches have some overlap in time.
     
     Parameters:
-    speed_name (str): The name of the speed variable to use for determining tracklets.
+    smooth_name (str): The name of the smooth variable to use for determining tracklets.
     num_batches (int): The number of batches to process.
     """
     counts_list = []
-    for batch_i in range(num_batches):
-        # LOAD PREPROCESSED DATA
-        ds_load_name = f'/output/preprocessed/{exp_name}/batch_{batch_i}/traj_data.h5'
-        ds = load_preprocessed_data(ds_load_name)
-        print(f'Batch {batch_i} loaded.')
+    for batch_i in tqdm(range(num_batches), 'Counting tracklets over time across batches'):
         
-        # Determine valid frames where speed is not NaN
-        valid = ds[f'x_{speed_name}'].notnull() # Using x coordinate to avoid issues of differentiation causing NaNs in speed
+        # LOAD PREPROCESSED DATA
+        ds_load_name = f'{h5_in}batch_{batch_i}_5.0Hz.hdf5'
+        ds = load_preprocessed_data(ds_load_name)
+        
+        # Determine valid frames where smooth is not NaN
+        valid = ds[f'x_{smooth_name}'].notnull() # Using x coordinate to avoid issues of differentiation causing NaNs in smooth
         num_tracklets = valid.sum(dim='id')
 
         counts_list.append(num_tracklets)
@@ -70,5 +71,5 @@ def tracklets_over_time(speed_name:str, num_batches:int, exp_name:str, num_detec
     ax[1].set_ylabel('Residuals', fontsize=14)
     ax[1].set_xlabel('Frame', fontsize=14)
     
-    plt.savefig(f'./plots/{exp_name}/all/tracklets_over_time_{speed_name}.png')
+    plt.savefig(f'{output_dir}tracklets_over_time_{smooth_name}.png')
 

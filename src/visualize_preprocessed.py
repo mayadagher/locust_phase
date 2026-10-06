@@ -8,6 +8,7 @@ import os
 
 cwd = os.getcwd()
 from helper_fns import *
+from clean_tracks import compute_speed
 
 
 '''_____________________________________________________PLOT FUNCTIONS____________________________________________________________'''
@@ -26,13 +27,19 @@ def plot_tracks(ds, output_dir: str, ids: np.array, start_frame:int = 0, end_fra
         plt.legend()
     plt.savefig(output_dir + 'original_tracks.png')
 
-def plot_smoothed_coords(ds, output_dir: str, id: int, smooth_names: list[str], start_frame: int = 0, end_frame: int | None = None): # Takes preprocessed xarray.Dataset as input that has raw and sg computed
+def plot_smoothed_coords(ds, output_dir: str, smooth_dict:dict, id: int, start_frame: int = 0, end_frame: int | None = None, fs = 5): # Takes preprocessed xarray.Dataset as input that has raw and sg computed
     
-    _, rel_frames = get_frame_slice(ds, start_frame, end_frame)
+    abs_frames, rel_frames = get_frame_slice(ds, start_frame, end_frame)
+    smooth_names = smooth_dict.keys()
 
     # Look at raw versus smooth x and y data for a single id
     coords = ['x', 'y', 'v']
+    y_labels = ['x (m)', 'y (m)', 'v (m/s)']
     _, axs = plt.subplots(len(coords), len(smooth_names), figsize = (8, 10), sharex = True)
+
+    # Add v_raw if it does not exist
+    if 'v_raw' not in ds.data_vars:
+        ds = compute_speed(ds, {'raw':None}, fs)
     
     for j, coord in enumerate(coords):
         
@@ -42,24 +49,31 @@ def plot_smoothed_coords(ds, output_dir: str, id: int, smooth_names: list[str], 
         for i, name in enumerate(smooth_names):
         
             # Load smoothed values
-            smoothed = ds[coord + '_' + name].to_numpy()[id, rel_frames]
+            if coord == 'v':
+                raw = ds['v_raw'].to_numpy()[id, rel_frames[1:]]
+                smoothed = ds[f'v_{name}'].to_numpy()[id, rel_frames[1:]]
+                t = rel_frames[1:]/fs
+            else:
+                raw = ds[f'{coord}_raw'].to_numpy()[id, rel_frames]
+                smoothed = ds[f'{coord}_{name}'].to_numpy()[id, rel_frames]
+                t = rel_frames/fs
 
             if len(smooth_names) > 1:
-                axs[j][i].plot(rel_frames, raw, label = 'Original')
-                axs[j][i].plot(rel_frames, smoothed, label = 'Smoothed', linestyle = '--')
+                axs[j][i].plot(t, raw, label = 'Original')
+                axs[j][i].plot(t, smoothed, label = 'Smoothed', linestyle = '--')
                 if j == len(coords) - 1:
-                    axs[j][i].set_xlabel('Frame', fontsize = 17)
+                    axs[j][i].set_xlabel('Time (s)', fontsize = 17)
                 if i == 0:
-                    axs[j][i].set_ylabel(coord, fontsize = 17)
+                    axs[j][i].set_ylabel(y_labels[j], fontsize = 17)
                 if j == 0:
                     axs[j][i].set_title(name, fontsize = 17)
             else:
-                axs[j].plot(rel_frames, raw, label = 'Original')
-                axs[j].plot(rel_frames, smoothed, label = 'Smoothed', linestyle = '--')
+                axs[j].plot(t, raw, label = 'Original')
+                axs[j].plot(t, smoothed, label = 'Smoothed', linestyle = '--')
                 if j == len(coords) - 1:
-                    axs[j].set_xlabel('Frame', fontsize = 17)
+                    axs[j].set_xlabel('Time (s)', fontsize = 17)
                 if i == 0:
-                    axs[j].set_ylabel(coord, fontsize = 17)
+                    axs[j].set_ylabel(y_labels[j], fontsize = 17)
                 if j == 0:
                     axs[j].set_title(name, fontsize = 17)
 
@@ -68,8 +82,14 @@ def plot_smoothed_coords(ds, output_dir: str, id: int, smooth_names: list[str], 
     else:
         axs[-1].legend()
 
+
     plt.tight_layout()
-    plt.savefig(output_dir + f'smoothed_speeds.png')
+    param_strs = []
+    for smooth in smooth_names:
+        param_str = smooth + '_' + '_'.join([str(param) for param in smooth_dict[smooth].values()])
+        param_strs.append(param_str)
+    all_smooths = '_'.join(param_strs)
+    plt.savefig(output_dir + f'check_smoothing/{all_smooths}_id_{id}_{abs_frames[0]}_{abs_frames[-1]}.png')
 
 def plot_speed_hists(ds, output_dir: str, smooth_names: list): # Takes preprocessed xarray.Dataset as input
 

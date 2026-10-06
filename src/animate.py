@@ -9,18 +9,9 @@ import imageio
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
 from matplotlib.collections import PolyCollection
-import plotly.graph_objects as go
-import plotly.colors as pc
-from plotly.subplots import make_subplots
-from data_handling import load_cluster_stats_h5
-from tqdm import tqdm
-import gc
-from cluster_analysis import find_reflections
 
-
-
-cwd = os.getcwd()
 from helper_fns import *
+
 
 '''_____________________________________________________ANIMATION FUNCTIONS____________________________________________________________'''
 
@@ -789,10 +780,34 @@ def animate_param_overlay(ds_kp:xr.Dataset, output_dir:str, frames_dir:str, para
     plt.close()
 
 
-def plot_voronoi_overlay(pos_valid_t:np.ndarray, arena_center: np.ndarray, arena_radius: float, values:np.ndarray, ax=None, cmap="viridis", alpha=0.5):
+def plot_voronoi_overlay(ds:xr.Dataset, rel_frame:int, arena_center_m: np.ndarray, arena_radius_m: float, values:str | None = None, plot = False, ax=None, cmap="viridis", alpha=0.5, bb:bool = False):
+
+    if bb:
+        x = ds['x_raw'].transpose('frame', 'id')
+        y = ds['y_raw'].transpose('frame', 'id')
+        positions = np.stack([x, y])
+    else:
+        positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
+
+    # Filter out detections outside of arena
+    dist_from_center = np.sqrt((positions[0,:,:] - arena_center_m[0])**2 + (positions[1,:,:] - arena_center_m[1])**2) # (n_frames, max_ids)
+    outside_arena_mask = dist_from_center > arena_radius_m
+
+    # Define valid mask
+    valid_mask = (~np.isnan(positions).any(axis = 0)) & (~outside_arena_mask) # (n_frames, max_ids)
+    valid_positions_t = positions[:, rel_frame, valid_mask[rel_frame]].T  # (n_ids, 2)
+
+    # Determine colour values
+    if values is not None:
+        if bb:
+            values = ds[values].transpose('frame', 'id').values[rel_frame, valid_mask[rel_frame]] # (n_ids,) # It's possible some values are nan
+        else:
+            values = ds[values].values[rel_frame, valid_mask[rel_frame]] # (n_ids,) # It's possible some values are nan
+    else:
+        values = np.ones(np.sum(valid_mask[rel_frame])) # (n_ids,)
 
     # Compute Voronoi tessellation
-    vor = Voronoi(pos_valid_t)
+    vor = Voronoi(valid_positions_t)
     
     if ax is None:
         fig, ax = plt.subplots()
@@ -813,7 +828,7 @@ def plot_voronoi_overlay(pos_valid_t:np.ndarray, arena_center: np.ndarray, arena
 
         # Clip and order vertices
         vertices = vor.vertices[np.array(region)[(np.array(region) != -1).astype(bool)].astype(int)]
-        poly = Polygon(clip_voronoi_region(vertices, arena_center, arena_radius, 0.05))
+        poly = Polygon(clip_voronoi_region(vertices, arena_center_m, arena_radius_m, 0.05))
 
         if poly.is_empty:
             excluded_indcs.append(point_idx)
@@ -822,845 +837,42 @@ def plot_voronoi_overlay(pos_valid_t:np.ndarray, arena_center: np.ndarray, arena
         # Append properties to lists (ordered)
         verts.append(np.array(poly.exterior.coords))
         colours.append(val)
-        areas.append(poly.area)          
+        areas.append(poly.area)  
 
-    coll = PolyCollection(verts, array=np.array(colours), cmap=cmap, edgecolor="k", linewidth=0.3, alpha=alpha)
+    # Make a local copy of the colormap and display NaNs as transparent
+    cmap_obj = plt.get_cmap(cmap).copy()
+    cmap_obj.set_bad((1, 1, 1, 0))
+
+    # Mask NaN values
+    colour_array = np.ma.masked_invalid(np.asarray(colours, dtype=float))
+    colours_arr = np.asarray(colours, dtype=float)
+    print("colours shape:", colours_arr.shape)
+    print("finite:", np.isfinite(colours_arr).sum())
+    print("nan:", np.isnan(colours_arr).sum())
+    print("min/max:", np.nanmin(colours_arr), np.nanmax(colours_arr))
+    print("first 20:", colours_arr[:20])
+
+    coll = PolyCollection(verts, array=colour_array, cmap=cmap_obj, edgecolor="k", linewidth=0.3, alpha=alpha)        
 
     ax.add_collection(coll)
     ax.autoscale()
-    ax.set_xlim([0, 7000])
-    ax.set_ylim([0, 7000])
+    ax.set_aspect('equal')
 
     # Compute neighbour relationships from Voronoi ridges
-    nbrs = {i: set() for i in range(len(pos_valid_t))}
+    nbrs = {i: set() for i in range(len(valid_positions_t))}
     for i1, i2 in vor.ridge_points:
         nbrs[i1].add(i2)
         nbrs[i2].add(i1)
     indcs = [sorted(list(v)) for v in nbrs.values()]
     included = np.ones(len(nbrs)).astype('bool')
-    included[np.array(excluded_indcs)] = False
+    if excluded_indcs:
+        included[np.array(excluded_indcs)] = False
     num_nbrs = np.array([len(nbrs) for nbrs in indcs])[included]
 
+    if plot:
+        if bb:
+            plt.savefig('voronoi_overlay_test_bb.png')
+        else:
+            plt.savefig('voronoi_overlay_test_kp.png')
+
     return ax, coll, areas, colours, num_nbrs
-
-def interactive_voronoi_overlay(ds:xr.Dataset, param:str, output_dir:str, arena_center: np.ndarray, arena_radius: float, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, n_bins:int = 10, cmap:str = 'viridis', fs:float = 5):
-
-    # Define position array to save time from accessing ds
-    positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
-    z = ds[param].values # (n_frames, max_ids)
-
-    # Set up colour bins
-    colourscale = pc.sample_colorscale(cmap, n_bins)
-    z_min, z_max = np.nanmin(z), np.nanmax(z)
-    print('z extrema: ', z_min, z_max)
-    
-    if z_max > 5*np.nanstd(z) + np.nanmean(z): # If maximum is a huge outlier, replace with more reasonable maximum
-        z_max = np.nanquantile(z, 0.95)
-        print('z 95th quantile: ', z_max)
-    bins = np.linspace(z_min, z_max, n_bins + 1)
-
-    # Filter out detections outside of arena
-    dist_from_center = np.sqrt((positions[0,:,:] - arena_center[0])**2 + (positions[1,:,:] - arena_center[1])**2) # (n_frames, max_ids)
-    outside_arena_mask = dist_from_center > arena_radius
-
-    # Define valid mask
-    valid_mask = (~np.isnan(positions).any(axis = 0)) & (~np.isnan(z)) & (~outside_arena_mask) # (n_frames, max_ids)
-
-    # Get frames
-    abs_frames, ds_idcs = get_frame_slice(ds, start_frame, end_frame, subsample)
-
-    fig = go.Figure()
-
-    # Track how many traces belong to each frame
-    traces_per_frame = []
-    areas = []
-
-    for f in ds_idcs:
-        # Filter valid positions and z values
-        valid_positions_t = positions[:, f, valid_mask[f]]  # (2, n_ids)
-        valid_z_t = z[f, valid_mask[f]]
-
-        if valid_positions_t.shape[1] < 3:
-            traces_per_frame.append(0)
-            continue
-
-        # Compute voronoi tessellation
-        vor = Voronoi(valid_positions_t.T)
-
-        bin_xs = [[] for _ in range(n_bins)]
-        bin_ys = [[] for _ in range(n_bins)]
-
-        # Iterate over each point
-        for point_idx, z_val in enumerate(valid_z_t):
-            region_idx = vor.point_region[point_idx]
-            region = vor.regions[region_idx]
-
-            # Exclude regions with no points
-            if len(region) == 0:
-                continue
-
-            # Clip and order vertices
-            vertices = vor.vertices[np.array(region)[(np.array(region) != -1).astype(bool)].astype(int)]
-            poly = Polygon(clip_voronoi_region(vertices, arena_center, arena_radius, 0.05))
-
-            if poly.is_empty:
-                continue
-
-            areas.append(poly.area)
-
-            bin_idx = min(np.searchsorted(bins, z_val) - 1, n_bins - 1)
-            pos = np.array(poly.exterior.coords)
-            bin_xs[bin_idx].extend(pos[:, 0].tolist() + [None])
-            bin_ys[bin_idx].extend(pos[:, 1].tolist() + [None])
-
-        for b in range(n_bins):
-            fig.add_trace(go.Scatter(x=bin_xs[b], y=bin_ys[b], fill='toself', mode='lines', fillcolor=colourscale[b], line=dict(width=0.5, color='rgba(0,0,0,0.3)'), visible=False, showlegend=False))
-            
-        traces_per_frame.append(n_bins)
-
-    # Add arena outline
-    theta = np.linspace(0, 2*np.pi, 300)
-    fig.add_trace(go.Scatter(x=arena_center[0] + arena_radius*np.cos(theta), y=arena_center[1] + arena_radius*np.sin(theta), mode='lines', line=dict(color='black'), showlegend=False))
-    circle_trace_idx = len(fig.data) - 1
-
-    # Add dummy scatter points for colour bar
-    fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(colorscale=cmap, cmin=z_min, cmax=z_max, color=[z_min], colorbar=dict(title=dict(text=param, side='right'),
-                tickvals=np.linspace(z_min, z_max, 6).tolist(), ticktext=[f'{v:.2f}' for v in np.linspace(z_min, z_max, 6)], thickness=20, len=0.75), showscale=True), showlegend=False, visible=True))
-    colourbar_trace_idx = len(fig.data) - 1
-
-    # Build slider steps — each step makes exactly its frame's traces visible
-    slider_steps = []
-    total_traces = sum(traces_per_frame) + 2 # Add 2 for circle and colour bar trace
-    cumulative = 0
-
-    for i, count in enumerate(traces_per_frame):
-        visibility = [False] * total_traces
-        for j in range(cumulative, cumulative + count):
-            visibility[j] = True
-        visibility[circle_trace_idx] = True  # always show circle
-        visibility[colourbar_trace_idx] = True
-
-        slider_steps.append(dict(
-            method='restyle',
-            args=[{'visible': visibility}],
-            label=str(abs_frames[i]),  # display actual frame number
-        ))
-        cumulative += count
-
-    # Make first frame visible by default
-    if traces_per_frame[0] > 0:
-        for i in range(traces_per_frame[0]):
-            fig.data[i].visible = True
-
-    # Add slider and fix axes
-    fig.update_layout(sliders=[dict(active=0, steps=slider_steps, currentvalue=dict(prefix='Frame: ', visible=True), pad=dict(t=50))],
-                      xaxis=dict(range=[arena_center[0] - arena_radius * 1.1, arena_center[0] + arena_radius * 1.1], constrain='domain'),
-                      yaxis=dict(range=[arena_center[1] - arena_radius * 1.1, arena_center[1] + arena_radius * 1.1],
-                      scaleanchor='x', scaleratio=1, constrain='domain'),
-                      title='Voronoi Tessellation Over Time')
-    
-
-    output_path = f"{output_dir}voronoi_sliders/voronoi_slider_{param}_{abs_frames[0]}_{abs_frames[-1]}_fs_{fs/round(np.diff(abs_frames)[0])}.html"
-    fig.write_html(output_path)
-    print(f"Saved to {output_path}.")
-
-    return
-
-def interactive_voronoi_distributions(ds:xr.Dataset, output_dir:str, arena_center:np.ndarray, arena_radius:float, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, n_bins: list[int] = [40, None, 30], fs:float = 5, density_factor:float = 1):
-
-    # Define position array to save time from accessing ds
-    positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
-    densities = ds['density_voronoi_None'].values*density_factor # (n_frames, max_ids)
-
-    # Filter out detections outside of arena
-    dist_from_center = np.sqrt((positions[0,:,:] - arena_center[0])**2 + (positions[1,:,:] - arena_center[1])**2) # (n_frames, max_ids)
-    outside_arena_mask = dist_from_center > arena_radius
-
-    # Define valid mask
-    valid_mask = (~np.isnan(positions).any(axis = 0)) & (~np.isnan(densities)) & (~outside_arena_mask) # (n_frames, max_ids)
-
-    # Get frames
-    abs_frames, ds_idcs = get_frame_slice(ds, start_frame, end_frame, subsample)
-
-    # Name parameters
-    titles = ['Voronoi areas', 'Voronoi neighbours', 'Voronoi densities']
-    xlabels = ['Area (㎡)', 'Number of neighbours (n)', 'Density (n/㎡)']
-    n_params = len(titles)
-
-    fig = make_subplots(rows=1, cols= 3, subplot_titles=titles, horizontal_spacing=0.08, vertical_spacing=0.12)
-
-    all_areas = []
-    all_nbr_counts = []
-
-    max_area = 0
-    max_nbrs = 0
-    max_density = np.quantile(densities[valid_mask], 0.999) # Some crazy outliers need to be excluded
-
-    # Iterate over each frame to collect area and nbr count data
-    for ds_idx in ds_idcs:
-
-        # Filter valid positions and z values
-        valid_positions_t = positions[:, ds_idx, valid_mask[ds_idx]].T # (n_ids, 2)
-
-        if valid_positions_t.shape[0] < 3:
-            continue
-
-        # Compute voronoi tessellation
-        vor = Voronoi(valid_positions_t)
-
-        # Now we don't care about the order of the polygons so we can compute the polygons in one line
-        polys = [Polygon(clip_voronoi_region(vor.vertices[np.array(region)[(np.array(region) != -1).astype(bool)].astype(int)], arena_center, arena_radius)) for region in vor.regions]
-
-        # Get areas of each polygon
-        areas = [poly.area/density_factor for poly in polys]
-
-        # Compute neighbour relationships from Voronoi ridges
-        nbrs = {i: set() for i in range(len(valid_positions_t))}
-        for i1, i2 in vor.ridge_points:
-            nbrs[i1].add(i2)
-            nbrs[i2].add(i1)
-        indcs = [sorted(list(v)) for v in nbrs.values()]
-        num_nbrs = np.array([len(nbrs) for nbrs in indcs])
-
-        # Append data to lists
-        all_areas.append(areas)
-        all_nbr_counts.append(num_nbrs)
-
-        # Update maxima
-        if np.max(areas) > max_area:
-            max_area = np.max(areas)
-        if np.max(num_nbrs) > max_nbrs:
-            max_nbrs = np.max(num_nbrs)
-
-    # Add ALL traces upfront (one per param per frame), only the first frame visible
-    maxes = [max_area, max_nbrs, max_density]
-    maxes_counts = [0, 0, 0]
-    
-    if not n_bins[1]: # If nbr bins not specified
-        n_bins[1] = max_nbrs
-
-    for f_idx, (frame_num, ds_idx) in enumerate(zip(abs_frames, ds_idcs)):
-        # Iterate over params to get each histogram
-        params = [all_areas[f_idx], all_nbr_counts[f_idx], densities[ds_idx, valid_mask[ds_idx]]]
-
-        for i, param in enumerate(params):
-            if i == 1:
-                bin_edges = np.arange(0, max_nbrs + 1)
-                counts, _ = np.histogram(param, bins = bin_edges, range = (0, maxes[i]))
-            else:
-                counts, bin_edges = np.histogram(param, bins=n_bins[i], range=(0, maxes[i]))
-            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-            if max(counts) > maxes_counts[i]:
-                maxes_counts[i] = max(counts)
-
-            fig.add_trace(go.Bar(x=bin_centers, y=counts,
-                                 name=titles[i],
-                                 showlegend=False,
-                                 visible=(f_idx == 0),  # only first frame visible initially
-                                 marker_color='steelblue',
-                                 marker_line_width=0), row=1, col=i + 1)
-
-    # Each slider step sets visibility: only the n_params traces for that frame are True
-    total_traces = positions.shape[1] * n_params
-    steps = []
-    for f_idx, frame_num in enumerate(abs_frames):
-        visibility = [False] * total_traces
-        for i in range(n_params):
-            visibility[f_idx * n_params + i] = True
-
-        steps.append({
-            'method': 'restyle',
-            'label': str(frame_num),
-            'args': [{'visible': visibility}],
-        })
-
-    sliders = [{
-        'active': 0,
-        'currentvalue': {'prefix': 'Frame: ', 'visible': True, 'xanchor': 'center'},
-        'pad': {'t': 50},
-        'steps': steps,
-    }]
-
-    fig.update_layout(
-        sliders=sliders,
-        bargap=0.02,
-        title_text='Distributions by Frame')
-
-    for i in range(n_params):
-        fig.update_xaxes(range=[0, maxes[i]], row=1, col=i + 1, title_text = xlabels[i])
-        fig.update_yaxes(range=[0, maxes_counts[i]], row=1, col=i + 1, title_text = 'Counts' if not i else '')
-
-    output_path = os.path.join(output_dir, f'voronoi_sliders/vor_distributions_{abs_frames[0]}_{abs_frames[-1]}_fs_{fs/round(np.diff(abs_frames)[0])}.html')
-    fig.write_html(output_path)
-    print(f'Saved to {output_path}')
-    return fig
-
-def interactive_cluster_analysis(input_path: str, min_obs:int = 5, max_layers:int | None = None, n_bins:int = 21):
-
-    # Load data
-    data = load_cluster_stats_h5(input_path)
-    
-    # Relative frames in integers
-    rel_frames = np.arange(-1*round((len(data) - 1)/2), round((len(data) - 1)/2) + 1)
-
-    # Initialize extrema dictionaries and parameter strings
-    all_params = data['0'].keys()
-    max_x = {p: 0 for p in all_params}
-    max_x['medPols'], max_x['meanThetas'], max_x['p_by_layer'], max_x['p_from_edge'] = 1, np.pi, 1, 1
-    min_x = {p: 0 for p in all_params}
-    min_x['ns'], min_x['areas'], min_x['meanThetas'] = 2, np.inf, -np.pi
-
-    # Iterate over frames to collect maxima
-    for rel_idx in rel_frames:
-        
-        for param in ['ns', 'areas', 'varPols', 'medDs', 'varDs', 'varThetas', 'd_by_layer', 'd_from_edge']:
-
-            # Update maximum overall value
-            vals = data[str(rel_idx)][param]
-
-            if param == 'areas':
-                min_val = np.nanquantile(vals, 0.01)
-                if min_val < min_x[param]:
-                    min_x[param] = min_val
-
-            if type(vals) == dict: # If layers
-                max_val = np.nanquantile(vals['data'], 0.999) # Ignoring crazy outliers
-            else:
-                max_val = np.nanquantile(vals, 0.999)
-
-            if max_val > max_x[param]:
-                max_x[param] = float(max_val)
-
-        del vals
-
-    titles = ['N distribution', 'Area distribution', 'Mean θ distribution', 'Area vs N', 'Med. pol & density vs N', 'Var. pol & density vs N', 'θ vs N', 'Pol vs density',
-              'Polarization by layer (centre)', 'Polarization by layer (edge)', 'Density by layer (centre)', 'Density by layer (edge)']
-
-    # Initialize figure
-    fig = make_subplots(rows=3, cols=4, subplot_titles=titles, horizontal_spacing=0.32, vertical_spacing=0.12,
-                        specs=[[{"type": "bar"}, {"type": "bar"}, {"type": "bar"}, {"type": "scatter"}],
-                               [{"secondary_y": True}, {"secondary_y": True}, {"type": "scatter"}, {"type": "scatter"}],
-                               [{"type": "scatter"}, {"type": "scatter"}, {"type": "scatter"}, {"type": "scatter"}]])
-
-    # Histograms
-    hist_params = ['ns', 'areas', 'meanThetas']
-    max_counts = {p: 0 for p in hist_params}
-
-    # Scatterplots (Areas vs N, Pols/dens vs N, Std pol/den vs N, theta vs N, pol vs den)
-    scatter_x_params = ['ns', 'ns', 'ns', 'ns', 'medDs']
-    scatter_y_params = ['areas', ['medPols', 'medDs'], ['varPols', 'varDs'], 'meanThetas', 'medPols']
-    scatter_rows = [1, 2, 2, 2, 2]
-    scatter_cols = [4, 1, 2, 3, 4]
-
-    # Layer plots
-    layer_params = ['p_by_layer', 'p_from_edge', 'd_by_layer', 'd_from_edge']
-
-    # Dictionary for axis labels
-    label_dict = {'ns': 'N', 'areas': 'Area (㎡)', 'medPols': 'Med. polarization', 'varPols': 'Var. polarization', 'medDs': 'Med. density (n/㎡)',
-                  'varDs': 'Var. density (n/㎡)', 'meanThetas': 'Avg. θ (rad)', 'varThetas': 'Var. θ (rad)', 'p_by_layer': 'Med. polarization',
-                  'p_from_edge': 'Med. polarization', 'd_by_layer': 'Med. density (n/㎡)', 'd_from_edge': 'Med. density (n/㎡)'}
-
-    def plot_layers(csr_dict:dict[str: np.ndarray[float]], min_obs:int, max_layers:int | None, rel_idx:int):
-
-        # Unpack vals and idcs arrays
-        vals = csr_dict['data']
-        idcs = csr_dict['indptr']
-
-        # Convert csr to (n_clusters, n_layers) matrix
-        layers = np.full((len(idcs) - 1, np.max(np.diff(idcs))), np.nan, dtype=np.float32)
-
-        for i in range(len(idcs[:-1])):
-            layers[i,:(idcs[i+1] - idcs[i])] = vals[idcs[i]:idcs[i+1]]
-
-        # Find appropriate cut-off of layers using number of observations or hard cut-off
-        if max_layers is None:
-            # Count number of finite observations
-            n_obs = np.sum(np.isfinite(layers), axis = 0)
-            cutoff = np.where(n_obs < min_obs)[0][0]
-
-        else:
-            cutoff = max_layers
-            
-        # Generate None separated xs and ys lists
-        xs = []
-        ys = []
-        for i in range(len(idcs[:-1])):
-            n = min((idcs[i+1] - idcs[i]), cutoff)
-            xs.extend(range(0, n))
-            ys.extend(vals[idcs[i]:(idcs[i] + n)].tolist())
-
-            # None separator - breaks the line between clusters
-            xs.append(None)
-            ys.append(None)
-
-        del idcs, vals
-
-        indivs_trace = go.Scatter(x=xs, y=ys, mode='lines', line=dict(color='rgba(55,138,221,0.2)', width=0.8),
-                                  showlegend=False, hoverinfo='skip', connectgaps=False, # Ensures no bridging across Nones
-                                  visible=(rel_idx == 0)) 
-        
-        # Compute mean line
-        means_x = np.arange(0, cutoff)
-        means_y = np.nanmean(layers[:,:cutoff], axis = 0)
-
-        mean_trace = go.Scatter(x=means_x, y=means_y, mode='lines', line=dict(color='#185FA5', width=2),
-                                showlegend=False, connectgaps=False, visible=(rel_idx == 0))
-
-        return indivs_trace, mean_trace
-
-    # Iterate over frames to plot and update max_counts for histograms
-    for rel_idx in tqdm(rel_frames):
-        # ---FIRST ROW---
-
-        # Histograms (N, area, thetas)
-        for i, param in enumerate(hist_params):
-
-            if param == 'meanThetas':
-                bin_edges = np.linspace(min_x[param], max_x[param], n_bins + 1)
-            else:
-                bin_edges = np.logspace(np.log10(max(min_x[param], 1e-6)), np.log10(max_x[param]), n_bins + 1)
-            counts, _ = np.histogram(data[str(rel_idx)][param], bins = bin_edges)
-            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-            # Update max_counts
-            if np.max(counts) > max_counts[param]:
-                max_counts[param] = np.max(counts)
-
-            # Add trace
-            fig.add_trace(go.Bar(x=bin_centers, y=counts,                            
-                                 showlegend=False,
-                                 visible=(rel_idx == 0),  # only t = 0 visible initially
-                                 marker_color='steelblue',
-                                 marker_line_width=0), row=1, col=i + 1)
-        
-        # ---(END OF FIRST AND) SECOND ROW---
-
-        for i, x_param in enumerate(scatter_x_params):
-            if type(scatter_y_params[i]) == list:
-                for j in range(2):
-                    fig.add_trace(go.Scatter(x=data[str(rel_idx)][x_param], y=data[str(rel_idx)][scatter_y_params[i][j]], mode='markers', 
-                                             marker=dict(color=['steelblue', 'coral'][j], size=5), showlegend=False, visible=(rel_idx == 0)), scatter_rows[i], scatter_cols[i], bool(j))
-            else:
-                fig.add_trace(go.Scatter(x=data[str(rel_idx)][x_param], y=data[str(rel_idx)][scatter_y_params[i]], mode='markers', 
-                                         marker=dict(color='steelblue', size=5), showlegend=False, visible=(rel_idx == 0)), scatter_rows[i], scatter_cols[i], False)
-                            
-        # ---THIRD ROW---
-
-        # Line plots (pols vs layer (center), pols vs layer (edge), dens vs layer (center), dens vs layer (edge))
-        for i in range(4):
-            idvs_trace, mean_trace = plot_layers(data[str(rel_idx)][layer_params[i]], min_obs, max_layers, rel_idx)
-            fig.add_trace(idvs_trace, 3, i+1)
-            fig.add_trace(mean_trace, 3, i+1)
-        del idvs_trace, mean_trace
-
-        data[str(rel_idx)] = None  # Reduce memory as we go
-        gc.collect()
-
-    # Build slider steps
-    traces_per_frame = len(fig.data) // len(rel_frames)
-    assert len(fig.data) % len(rel_frames) == 0, f"Trace count {len(fig.data)} not divisible by {len(rel_frames)} frames"
-
-    steps = []
-    for i, rel in enumerate(rel_frames):
-        # Create 
-        visible_mask = np.zeros(traces_per_frame * len(rel_frames)).astype(bool)
-
-        start = i * traces_per_frame
-        end = start + traces_per_frame
-        visible_mask[start:end] = True
-
-        steps.append(dict(method='restyle', args=[{'visible':visible_mask.tolist()}],
-                         label=f't={rel:+d}' if rel != 0 else 't=0'))
-        
-    # Update figure
-    fig.update_layout(sliders=[dict(active=round((len(data) - 1)/2), steps=steps,
-                                   currentvalue=dict(prefix='Relative frame: ', font=dict(size=13)),
-                                   pad=dict(t=40, b=10))],
-                      height=900, template='plotly_white', margin=dict(l=50, r=30, t=80, b=80))
-
-    # Histograms
-    for i in range(3):
-        x_scale = ['log', 'log', 'linear'][i]
-        print([np.log10(max(min_x[hist_params[i]], 1e-6)), np.log10(max_x[hist_params[i]])])
-        fig.update_xaxes(title_text = label_dict[hist_params[i]], range = [min_x[hist_params[i]], max_x[hist_params[i]]]
-                                                                           if x_scale == 'linear'
-                                                                           else [np.log10(max(min_x[hist_params[i]], 1e-6)), np.log10(max_x[hist_params[i]])], 
-                         row = 1, col = i + 1, type = x_scale)
-        y_scale = ['log', 'log', 'linear'][i]
-        fig.update_yaxes(title_text = 'Counts', range = [0, max_counts[hist_params[i]]]
-                                                         if y_scale == 'linear'
-                                                         else [0.9, np.log10(max_counts[hist_params[i]])], 
-                         row = 1, col = i + 1, type = y_scale)
-
-    # Scatterplots
-    for i in range(5):
-        x_scale = ['log', 'log', 'log', 'log', 'linear'][i]
-        fig.update_xaxes(title_text = label_dict[scatter_x_params[i]], range = [min_x[scatter_x_params[i]], max_x[scatter_x_params[i]]]
-                                                                                if x_scale == 'linear'
-                                                                                else [np.log10(max(min_x[scatter_x_params[i]], 1e-6)), np.log10(max_x[scatter_x_params[i]])], 
-                         row = scatter_rows[i], col = scatter_cols[i], type = x_scale)
-
-        y_scale = ['log', 'linear', 'linear', 'linear', 'linear'][i]
-        if type(scatter_y_params[i]) == list:
-            for j in range(2):
-                fig.update_yaxes(title_text = label_dict[scatter_y_params[i][j]], range = [min_x[scatter_y_params[i][j]], max_x[scatter_y_params[i][j]]] 
-                                                                                           if y_scale == 'linear' 
-                                                                                           else [np.log10(max(min_x[scatter_y_params[i][j]], 1e-6)), np.log10(max_x[scatter_y_params[i][j]])], 
-                                 row = scatter_rows[i], col = scatter_cols[i], secondary_y = bool(j), type = y_scale)
-        else:
-            fig.update_yaxes(title_text = label_dict[scatter_y_params[i]], range = [min_x[scatter_y_params[i]], max_x[scatter_y_params[i]]] 
-                                                                                    if y_scale == 'linear' 
-                                                                                    else [np.log10(max(min_x[scatter_y_params[i]], 1e-6)), np.log10(max_x[scatter_y_params[i]])], 
-                             row = scatter_rows[i], col = scatter_cols[i], type = y_scale)
-        
-    # Layer plots
-    for i in range(4):
-        fig.update_xaxes(title_text = ['Layer (from center)', 'Layer (from edge)', 'Layer (from center)', 'Layer (from edge)'][i], row = 3, col = i + 1)
-        fig.update_yaxes(title_text = label_dict[layer_params[i]], row = 3, col = i + 1, range = [min_x[layer_params[i]], max_x[layer_params[i]]])
-
-    output_path = '.'.join(input_path.split('.')[:-1]) + '.html'
-    fig.write_html(output_path)
-    print(f'Saved to {output_path}')
-    return fig
-
-def interactive_cluster_merging(input_path: str):
-
-    data = load_cluster_stats_h5(input_path)
-
-    # Collect total clustered individuals and total number of clusters per absolute frame
-    abs_frames = [int(key) for key in data.keys()]
-    n_clustered = []
-    n_clusters = []
-
-    for abs in data.keys():
-        ns = data[abs]['ns']
-        n_clustered.append(np.sum(ns))
-        n_clusters.append(len(ns))
-
-    # Create figure
-    fig = make_subplots(rows=1, cols=2, specs=[[{"secondary_y": True}, {"secondary_y": False}]])
-
-    # Col 1: time series
-    fig.add_trace(go.Scatter(x=abs_frames, y=n_clustered, line=dict(color='steelblue'), name="Clustered individuals"), secondary_y=False, row=1, col=1)
-    fig.add_trace(go.Scatter(x=abs_frames, y=n_clusters, line=dict(color='coral'), name="Clusters"), secondary_y=True, row=1, col=1)
-
-    # Col 2: n_clustered vs n_clusters scatter
-    fig.add_trace(go.Scatter(x=n_clustered, y=n_clusters, mode='markers', marker=dict(color=abs_frames, colorscale='Viridis', colorbar=dict(title='Absolute frame', orientation='h', x=0.72, y=-0.1, xanchor='center', yanchor='top',
-                                                                                                                                            len=0.45, thickness=20), showscale=True), name="Single frame"), secondary_y=False, row=1, col=2)
-
-    # Add range slider to col 1 x-axis only
-    fig.update_layout(xaxis=dict(rangeslider=dict(visible=True), type='linear'),
-                    yaxis=dict(anchor="x", autorange=True, mirror=True, showline=True, side="left", tickmode="auto", ticks="", type="linear", zeroline=False),
-                    yaxis2=dict(anchor="x", autorange=True, mirror=True, showline=True, side="right", tickmode="auto", ticks="", type="linear", zeroline=False))
-
-    # Update labels — use col to target the right axis
-    fig.update_xaxes(title_text='Frame', row=1, col=1)
-    fig.update_xaxes(title_text='Total number of clustered individuals', row=1, col=2)
-    fig.update_yaxes(title_text='Total number of clustered individuals', secondary_y=False, row=1, col=1)
-    fig.update_yaxes(title_text='Total number of clusters', secondary_y=True, row=1, col=1)
-    fig.update_yaxes(title_text='Total number of clusters', row=1, col=2)
-
-    output_path = '.'.join(input_path.split('.')[:-1]) + '_merging.html'
-    fig.write_html(output_path)
-    print(f'Saved to {output_path}')
-    return fig
-
-def interactive_cluster_structure(ds:xr.Dataset, input_path:str, layer_cutoff:int| None = None, fps:int = 5, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1):
-
-    # Load data
-    data = load_cluster_stats_h5(input_path)
-
-    # Define stat names that will be aggregated and initialize storage dictionary
-    stat_names = ['p_by_layer', 'p_from_edge', 'd_by_layer', 'd_from_edge']
-
-    # Store data according to max_layer value and relative frame - first by max_layer, then by stat name
-    stats_by_max_layer:dict[int, dict[str, list]] = {}
-
-    # Iterate over absolute frames
-    for j, key in enumerate(data.keys()):
-
-        # Iterate over stat type
-        for stat in stat_names:
-
-            # Get observations for this absolute frame
-            csr_dict = data[key][stat]
-
-            # Unpack vals and idcs arrays
-            vals = csr_dict['data']
-            idcs = csr_dict['indptr']
-
-            # Add lists to dictionary
-            for i in range(len(idcs) - 1):
-                max_layer = idcs[i+1] - idcs[i]
-                stats_by_max_layer.setdefault(int(max_layer), {}).setdefault(stat, []).append(vals[idcs[i]:idcs[i+1]])
-
-    def plot_layers(stats_by_max_layer:dict[int, dict[str, list]], max_layer:int, stat:str, cutoff:int | None = None):
-
-        # Generate None separated xs and ys lists
-        xs = []
-        ys = []
-        for row in stats_by_max_layer[max_layer][stat]:
-            y = row[:cutoff]
-            xs.extend(range(len(y)))
-            ys.extend(y)
-
-            # None separator - breaks the line between clusters
-            xs.append(None)
-            ys.append(None)
-
-        # Create plotly trace for individual cluster curves
-        indivs_trace = go.Scatter(x=xs, y=ys, mode='lines', line=dict(color="#FFF0B8", width=0.8), showlegend=False, hoverinfo='skip', connectgaps=False, visible=(max_layer == 5))
-
-        # Take median of all cluster curves as a function of layer
-        
-        
-        median_y = np.nanmedian(stats_by_max_layer[max_layer][stat], axis = 0)[:cutoff]
-        median_x = np.arange(len(median_y))
-
-        # Create plotly trace for median curve
-        median_trace = go.Scatter(x=median_x, y=median_y, mode='lines', line=dict(color="#1172D2", width=2), showlegend=False, connectgaps=False, visible=(max_layer == 5))
-
-        return indivs_trace, median_trace, np.nanmax(stats_by_max_layer[max_layer][stat])
-    
-    # Initialize figure and variables to store extrema
-    fig = make_subplots(rows=2, cols=2, horizontal_spacing=0.16, vertical_spacing=0.12)
-    max_x = layer_cutoff if layer_cutoff else np.max(list(stats_by_max_layer.keys()))
-    max_y = {stat: [1, 1, 0, 0] for stat in stat_names}
-    all_max_ds = []
-    
-    # Iterate over unique n values and plot (including adding slider steps)
-    unique_max_layers = np.unique(list(stats_by_max_layer.keys()))
-    steps = []
-    traces_per_frame = 2*len(stat_names) # 2: Individuals, median
-
-    for j, max_layer in enumerate(unique_max_layers):
-
-        # Iterate over different stats
-        for i, stat in enumerate(stat_names):
-
-            # Get traces
-            indivs, median, maxy = plot_layers(stats_by_max_layer, max_layer, stat, layer_cutoff)
-
-            # Update extrema
-            if stat == 'd_by_layer': # Don't need to do it for d_from_edge, since values are the same
-                all_max_ds.append(maxy)
-
-            # Add traces to figure
-            fig.add_trace(indivs, row= (i // 2) + 1, col= (i % 2) +1)
-            fig.add_trace(median, row= (i // 2) + 1, col= (i % 2) +1)
-    
-        # Create a visibility mask
-        visible_mask = np.zeros(traces_per_frame * len(unique_max_layers)).astype(bool)
-        start = j*traces_per_frame
-        end = start + traces_per_frame
-        visible_mask[start:end] = True
-
-        steps.append(dict(method='restyle', args=[{'visible':visible_mask.tolist()}], label=f'l = {max_layer}'))
-
-    # Update maximum density values using quantiles (to exclude outliers)
-    for stat in ['d_by_layer', 'd_from_edge']:
-        max_y[stat] = np.quantile(all_max_ds, 0.9)
-
-    # Update figure
-    fig.update_layout(sliders=[dict(active= 5, steps=steps, currentvalue=dict(prefix='Layer radius: ', font=dict(size=13)), pad=dict(t=40, b=10))], height=900, template='plotly_white', margin=dict(l=50, r=30, t=80, b=80))
-    
-    
-    # Update axes of figure
-    row_labels = ['Median polarization', 'Median density']
-    col_labels = ['Voronoi layer (from center)', 'Voronoi layer (from edge)']
-    for i in range(4):
-        fig.update_xaxes(title_text=col_labels[i%2] if i > 1 else None, range=[0, max_x], row=(i//2)+1, col=(i%2)+1)
-        fig.update_yaxes(title_text=row_labels[i//2] if not (i%2) else None, range=[0, max_y[stat_names[i]]], row=(i//2)+1, col=(i%2)+1)
-
-    # Save figure
-    output_path = '.'.join(input_path.split('.')[:-1]) + '_structure.html'
-    fig.write_html(output_path)
-    print(f'Saved to {output_path}')
-    return fig
-
-import os
-import numpy as np
-import xarray as xr
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-
-def plot_distribution_over_time_interactive(ds: xr.Dataset, y_var: str, y_label: str, output_dir: str, title: str, batch_num:int, y_factor: float = 1, fps: int = 5, start_frame: int = 0, end_frame: int = None, y_bins: int = 50, y_quant: float = 1, 
-                                            time_bins: int = 200, subsample: int = 1):
-    """Plot distribution over time with an interactive PDF for each time bin."""
-
-    # Get absolute frame values
-    abs_frames, ds_idcs = get_frame_slice(ds, rel_start=start_frame, rel_end=end_frame, in_function_subsample=subsample)
-
-    dist_array = ds[y_var].values[ds_idcs, :] * y_factor
-    _, n_ids = dist_array.shape
-
-    # Coordinates for every data point
-    x = np.repeat(abs_frames, n_ids) / fps
-    y = dist_array.flatten()
-
-    # Remove NaNs and values above requested quantile
-    y_max = np.nanquantile(y, y_quant)
-    mask = (~np.isnan(y)) & (y <= y_max)
-
-    x_clean = x[mask]
-    y_clean = y[mask]
-
-    # Compute histogram explicitly so both panels use identical bins
-    H, x_edges, y_edges = np.histogram2d(x_clean, y_clean, bins=[time_bins, y_bins])
-
-    x_centers = (x_edges[:-1] + x_edges[1:]) / 2
-    y_centers = (y_edges[:-1] + y_edges[1:]) / 2
-    y_widths = np.diff(y_edges)
-
-    # Convert counts to log10 for heatmap visualization
-    # NaNs make zero-count bins transparent
-    H_log = np.where(H.T > 0, np.log10(H.T), np.nan)
-
-    # Initial PDF
-    counts = H[0]
-
-    if counts.sum() > 0:
-        pdf = counts / (counts.sum() * y_widths)
-    else:
-        pdf = np.zeros_like(counts)
-
-    fig = make_subplots(rows=1, cols=2, column_widths=[0.72, 0.28], horizontal_spacing=0.20, subplot_titles=("Distribution over time", "Distribution at selected time"))
-
-    # Left: 2D histogram
-    fig.add_trace(go.Heatmap(x=x_centers, y=y_centers, z=H_log, colorscale="Magma", colorbar=dict(title="log10(Num. individuals)", x=0.59),
-                  hovertemplate=("Time: %{x:.2f} s<br>" + y_label + ": %{y:.3g}<br>" "log10(count): %{z:.2f}" "<extra></extra>"),), row=1, col=1)
-
-    # Right: PDF, horizontal so it shares the y variable
-    fig.add_trace(go.Scatter(x=pdf, y=y_centers, mode="lines", fill="tozerox", name="PDF", hovertemplate=(y_label + ": %{y:.3g}<br>" "PDF: %{x:.3g}" "<extra></extra>")), row=1, col=2)
-
-    # Frames update the PDF and vertical line
-    frames = []
-
-    for i, time in enumerate(x_centers):
-
-        counts = H[i]
-
-        if counts.sum() > 0:
-            pdf_i = counts / (counts.sum() * y_widths)
-        else:
-            pdf_i = np.zeros_like(counts)
-
-        frames.append(go.Frame(name=str(i), data=[go.Scatter(x=pdf_i, y=y_centers)], traces=[1], layout=go.Layout(shapes=[dict(type="line", x0=time, x1=time, y0=0, y1=1, xref="x", yref="paper",
-                                                                                                                               line=dict(width=3, color="white"))])))
-
-    fig.frames = frames
-
-    # Slider
-    slider_steps = []
-
-    for i, time in enumerate(x_centers):
-
-        # Approximate absolute frame represented by this time bin
-        frame = int(round(time * fps))
-
-        slider_steps.append(dict(method="animate", args=[[str(i)], dict(mode="immediate", frame=dict(duration=0, redraw=True), transition=dict(duration=0))], label=str(frame)))
-
-    sliders = [
-        dict(
-            active=0,
-            currentvalue=dict(
-                prefix="Frame: ",
-                font=dict(size=14),
-            ),
-            pad=dict(t=50),
-            steps=slider_steps,
-        )
-    ]
-
-    # Initial vertical line
-    initial_shape = dict(
-        type="line",
-        x0=x_centers[0],
-        x1=x_centers[0],
-        y0=0,
-        y1=1,
-        xref="x",
-        yref="paper",
-        line=dict(
-            width=3,
-            color="white",
-        ),
-    )
-
-    fig.update_layout(
-        title=title,
-        sliders=sliders,
-        shapes=[initial_shape],
-        height=650,
-        width=1300,
-        template="plotly_white",
-        showlegend=False,
-    )
-
-    fig.update_xaxes(
-        title_text="Experiment time (s)",
-        row=1,
-        col=1,
-    )
-
-    fig.update_yaxes(
-        title_text=y_label,
-        row=1,
-        col=1,
-    )
-
-    fig.update_xaxes(
-        title_text="Probability density",
-        row=1,
-        col=2,
-    )
-
-    # Match y ranges exactly between panels
-    fig.update_yaxes(
-        range=[y_edges[0], y_edges[-1]],
-        row=1,
-        col=1,
-    )
-
-    fig.update_yaxes(
-        range=[y_edges[0], y_edges[-1]],
-        row=1,
-        col=2,
-    )
-
-    # Save as interactive HTML
-    save_dir = os.path.join(output_dir, f"hists_over_time/sliders/batch_{batch_num}")
-    os.makedirs(save_dir, exist_ok=True)
-
-    save_path = os.path.join(
-        save_dir,
-        f"{y_var}_{abs_frames[0]}_{abs_frames[-1]}_interactive.html",
-    )
-
-    fig.write_html(save_path)
-
-    print(f"Interactive histogram saved to {save_path}")
-
-    return fig
-
-
-    
-    # def idk():
-    #     # Load data
-    #     data = load_cluster_stats_h5(input_path)
-
-    #     # Get event frames
-    #     _, abs_event_frames, _, _ = find_reflections(ds, fps, start_frame, end_frame, subsample)
-
-    #     # Find absolute frames in data
-    #     abs_frames = [int(key) for key in data.keys()]
-
-    #     # For each abs_frame, find the nearest event frame and compute offset
-    #     offsets = abs_event_frames[np.argmin(np.abs(abs_frames[:, None] - abs_event_frames[None, :]), axis=1)]
-    #     rel_frames = abs_frames - offsets
-        
-
-
-    

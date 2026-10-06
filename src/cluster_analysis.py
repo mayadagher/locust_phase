@@ -291,16 +291,13 @@ def extract_frame_cluster_stats(positions:np.ndarray, pol_vals:np.ndarray, theta
         areas=areas, ns=ns, median_pols=med_pols, var_pols=var_pols, median_densities=med_ds, var_densities=var_ds, mean_thetas=mean_thetas, var_thetas=var_thetas,
         p_by_layer=p_by_layer, d_by_layer=d_by_layer, p_from_edge=p_from_edge, d_from_edge=d_from_edge)
 
-def find_reflections(ds: xr.Dataset, fps:int = 5, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1):
+def find_reflections(ds: xr.Dataset, fps:int = 5, start_frame:int = 0, end_frame:int | None = None, arena_center_m:np.ndarray = np.array([0.01, 0]), subsample:int = 1):
     
     # Get frames
     abs_frames, ds_idcs = get_frame_slice(ds, start_frame, end_frame, subsample)
 
     # Get median value of polarizations as indicator for reflections (mostly sinusoidal)
     pols = np.nanmedian(ds['polarization_voronoi_None'].values[ds_idcs,:], axis = 1)
-
-    # Get median value of density as indicator for side of reflections (mostly sinusoidal, twice the period, same phase)
-    dens = np.nanmedian(ds['density_voronoi_None'].values[ds_idcs,:], axis = 1)
 
     # Get dominant frequency
     _, _, _, dominant_freq = fft_timeseries(pols, fps)
@@ -315,10 +312,9 @@ def find_reflections(ds: xr.Dataset, fps:int = 5, start_frame:int = 0, end_frame
         prominence=0.1,                  # ignore shallow noise fluctuations
     )
 
-    # Classify each reflection as left (density peak) or right (density trough)
-    # by checking whether density is above or below its median at each trough frame
-    dens_median = np.median(dens[trough_frames])
-    sides = np.where(dens[trough_frames] > dens_median, 'left', 'right')
+    # Classify each reflect as left or right by checking how median x relates to center of arena
+    xs = np.nanmedian(ds['centroid_x'].values[ds_idcs, :], axis = 1)
+    sides = np.where(xs[trough_frames] > arena_center_m[0], 'right', 'left')
 
     return trough_frames, abs_frames[trough_frames], period_frames, sides
 
