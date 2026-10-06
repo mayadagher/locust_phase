@@ -1,0 +1,21 @@
+[33me810abb[m[33m ([m[1;36mHEAD[m[33m, [m[1;31morigin/main[m[33m)[m HEAD@{0}: pull --rebase (start): checkout e810abbb79122e95c5ccb7ade170f45208d5156f
+[33m61d18dd[m[33m ([m[1;32mmain[m[33m)[m HEAD@{1}: commit: Add more slider functions and split animate.py into animate.py and sliders. py
+[33m0ae3af7[m HEAD@{2}: commit: Improved phase plotting and added animation. Also made files for MoCap synchronization using trajectory matches.
+[33m0f891da[m HEAD@{3}: commit: Improved phase plotting and added animation. Also made files for MoCap synchronization using trajectory matches.
+[33m538f5ab[m HEAD@{4}: commit: Added files for dewarping video and synchronizing motion capture and video data temporally, iterated on calibration techniques
+[33m4af1282[m HEAD@{5}: commit: Adapted technique for temporal synchronization using median density group signal.
+[33m6849877[m HEAD@{6}: commit: Functions added to animate.py and refined, cluster_analysis and data_handling updated to include more information in cluster statistics and pre-factor density.
+[33m9131dc9[m HEAD@{7}: commit: Added cluster analysis and correlation length code
+[33m51b454a[m HEAD@{8}: commit: Added plotly plotting functions, added to helper_fns
+[33m711af89[m HEAD@{9}: commit: Improved preprocess function to be 30x faster and added statistics function for deciding thresholds used for cleaning.
+[33m41bec30[m HEAD@{10}: commit: Added analyses using only non-tracked keypoints including entropy calculations, polarization
+[33m75d7f50[m HEAD@{11}: commit: Cleaning and generalizing across multiple files
+[33mc0f8b63[m HEAD@{12}: commit: Cleaning and generalizing across multiple files
+[33md2e2218[m HEAD@{13}: commit: Organizational changes, functions that compute over all batches, better data acquisition from volumes.
+[33ma2ee508[m HEAD@{14}: commit: Organizational changes, functions that compute over all batches, better data acquisition from volumes.
+[33m3fbf506[m HEAD@{15}: commit: Added spline smoothing, minor refinements and correlation plots
+[33mfec14fd[m HEAD@{16}: commit: Added and refined autocorrelation and psd functions, generalized some functions to the helper_fns file.
+[33mdc1c778[m HEAD@{17}: commit: Fixed bug with run length checking, consolidated plotting of psds, changed storage type of psds.
+[33ma3738ae[m HEAD@{18}: commit: Reorganization of files and functions, general clean-up.
+[33m2819b53[m HEAD@{19}: Branch: renamed refs/heads/main to refs/heads/main
+[33m2819b53[m HEAD@{21}: commit (initial): Initial commit
