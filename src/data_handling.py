@@ -395,4 +395,55 @@ def load_cluster_stats_h5(input_path: str) -> dict[str, dict]:
             out[rel_frame] = entry
 
     return out
-    
+
+def cluster_ids_to_h5(results: dict[int, list], output_dir: str, h5_name:str, params: dict):
+    """
+    Save per-frame cluster ids to HDF5. Also save Voronoi construction related values, since those are expensive to
+    recompute.
+
+    Layout per absolute frame group:
+        /abs_frame/
+            ids 
+            layers
+            index_ptr (CSR format for ragged array, since number of arrays and number of ids per array vary)
+    """
+    joined_path = output_dir + h5_name
+    with h5py.File(joined_path + '.h5', 'a') as f:
+        for abs_frame, clusters in results.items():
+
+            group_name = str(abs_frame)
+            if group_name in f:
+                del f[group_name]  # Replace this frame's previous results
+            grp = f.create_group(group_name)
+
+            # Iterate over cluster
+            ids = []
+            layers = []
+            idx_ptr = [0]
+
+            for cluster in clusters:
+                ids.extend(cluster.ids.astype(int))
+                layers.extend(cluster.layers.astype(int)) # I am assuming no layers are nan
+                idx_ptr.append(idx_ptr[-1] + len(cluster.ids))
+
+            grp.create_dataset('ids', data = ids, compression = 'gzip')
+            grp.create_dataset('layers', data = layers, compression = 'gzip')
+            grp.create_dataset('idx_ptr', data = idx_ptr, compression = 'gzip')
+
+    # Save .json file with params used to compute clusters
+    Path(joined_path).with_suffix(".json").write_text(json.dumps(params, indent=2, sort_keys=True))
+
+    print(f'Saved to {output_dir}.')
+
+def load_cluster_ids(input_path:str):
+    '''Load cluster id and layer data from .hdf5 file.'''
+
+    out = {}
+    with h5py.File(input_path, 'r') as f:
+        for group_name in f:
+            grp = f[group_name]
+            abs_frame = int(group_name)
+
+            out[abs_frame] = {'ids': grp['ids'][:], 'layers': grp['layers'][:], 'idx_ptr': grp['idx_ptr'][:]}
+
+    return out

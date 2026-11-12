@@ -1528,7 +1528,6 @@ def plot_reflection_aligned_variable_distributions(
     value_bins: int = 40,
     value_range: tuple[float, float] | None = None,
     subsample: int = 1,
-    period:int = 465,
 ):
     """Plot probability distributions of a variable over x and y around reflections."""
     

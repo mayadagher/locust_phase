@@ -408,9 +408,9 @@ def animate_orientations_fast(ds:xr.DataArray, smooth_name:str, output_dir:str, 
     # Pull data into np.arrays for fast access during animation
     all_x = ds_sub[f'x{suffix}'].values # (n_ids, n_frames)
     all_y = ds_sub[f'y{suffix}'].values
-    all_theta = ds_sub[f'theta{suffix}'].values
+    all_theta = ds_sub[f'theta'].values
     
-    n_ids, n_frames = all_x.shape
+    n_frames, n_ids = all_x.shape
     
     fig, ax = plt.subplots()
     ax.set_axis_off()
@@ -422,7 +422,7 @@ def animate_orientations_fast(ds:xr.DataArray, smooth_name:str, output_dir:str, 
     # Initialize artists
     lines = [ax.plot([], [], '-', c='black', lw=1, alpha=0.6)[0] for _ in range(n_ids)]
     oris = [ax.plot([], [], '-', c='red', lw=2)[0] for _ in range(n_ids)]
-    line_len = 20
+    line_len = 0.02
 
     def init():
         return lines + oris
@@ -433,16 +433,16 @@ def animate_orientations_fast(ds:xr.DataArray, smooth_name:str, output_dir:str, 
         
         for i in range(n_ids):
             # Update trail lines
-            seg_x = all_x[i, start_idx : idx + 1]
-            seg_y = all_y[i, start_idx : idx + 1]
+            seg_x = all_x[start_idx : idx + 1, i]
+            seg_y = all_y[start_idx : idx + 1, i]
             lines[i].set_data(seg_x, seg_y)
             
             # Update orientation vectors (current frame only)
-            curr_x = all_x[i, idx]
+            curr_x = all_x[idx, i]
             
             if not np.isnan(curr_x and idx):
-                curr_y = all_y[i, idx]
-                curr_t = all_theta[i, idx]
+                curr_y = all_y[idx, i]
+                curr_t = all_theta[idx, i]
                 oris[i].set_data([curr_x, curr_x + line_len * np.cos(curr_t)], [curr_y, curr_y + line_len * np.sin(curr_t)])
             else:
                 oris[i].set_data([], [])
@@ -453,7 +453,7 @@ def animate_orientations_fast(ds:xr.DataArray, smooth_name:str, output_dir:str, 
         return lines + oris
 
     ani = FuncAnimation(fig, update, frames=n_frames, init_func=init, interval=interval, blit=True, repeat=False)
-    ani.save(f"{output_dir}/orientations{suffix}.gif", writer='pillow')
+    ani.save(f"{output_dir}/validate_combination/orientations{suffix}.gif", writer='pillow')
     plt.close(fig)
 
 def animate_state(ds:xr.DataArray, x_var:str, y_var:str, output_dir:str, start_frame:int = 0, end_frame:int | None = None, interval:int = 50, trail:int =  10):

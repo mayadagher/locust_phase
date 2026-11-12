@@ -2,6 +2,7 @@
 
 import numpy as np
 import xarray as xr
+import pynumdiff
 import scipy
 import time
 
@@ -63,11 +64,13 @@ def spline_scipy(x:np.ndarray, degree:int=2, s:float=0.5):
 
     return x_hat
 
-def smooth_nantolerant(x: xr.DataArray, func, params: dict, min_tracklet_length: int):
+def smooth_nantolerant(x: xr.DataArray, func, params: dict, min_tracklet_length: int, two_outputs:bool = False):
     """Apply a smoothing function to a 1D array (frame axis) while tolerating NaNs."""
 
     x = np.asarray(x, dtype=float)
     out = np.full_like(x, np.nan)
+    if two_outputs:
+        out2 = np.full_like(x, np.nan)
     valid = np.isfinite(x)
 
     # Find contiguous finite segments
@@ -88,15 +91,22 @@ def smooth_nantolerant(x: xr.DataArray, func, params: dict, min_tracklet_length:
         if n < min_tracklet_length:  # Too short for interpretation: exclude tracklet
             out[s:e] = np.nan
             continue
+        
+        result = func(seg, **params)
+        if two_outputs: # Some functions may have multiple outputs
+            out[s:e] = result[0]
+            out2[s:e] = result[1]
+        else:
+            out[s:e] = result
 
-        out[s:e] = func(seg, **params)
-
+    if func == pynumdiff.finite_difference.finitediff:
+        return out, out2
     return out
 
 def compute_speed(ds:xr.Dataset, smooth_dict:dict, fs: float = 5):
-    '''Compute speed using methods specified by speed_types (a dictionary with speed type as keys and parameter dictionaries as values). 
+    '''Compute speed using methods specified by smooth_dict (a dictionary with smooth type as keys and parameter dictionaries as values). 
     fs is sample frequency and is used to compute minimum tracklet length and to convert units to /s from /frame.'''
-    speed_types = list(smooth_dict.keys())
+    smooth_types = list(smooth_dict.keys())
 
     # Make this function more general
     if 'x_raw' not in ds:
@@ -114,16 +124,21 @@ def compute_speed(ds:xr.Dataset, smooth_dict:dict, fs: float = 5):
         dy = y_coord.diff('frame')
         return np.hypot(dx, dy) / dt
 
-    if 'raw' in speed_types: # Compute instantaneous speed from raw positions
+    if 'raw' in smooth_types: # Compute instantaneous speed from raw positions
         ds['v_raw'] = speed_from_coords(x, y)
 
+    if 'high_ord' in smooth_types: # Compute high-order derivatives
+        high_ord_params = smooth_dict['high_ord']
+        min_tracklet_length = high_ord_params['order'] + 1
 
-    if 'spline' in speed_types: # Compute spline smoothed speed
-        print('Fitting spline')
+        ds['x_high_ord'], vx_high_ord = xr.apply_ufunc(smooth_nantolerant, x, input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs={'func':pynumdiff.finite_difference.finitediff, 'params': high_ord_params, 'min_tracklet_length':min_tracklet_length, "two_outputs":True}, dask = 'parallelized')
+        ds['y_high_ord'], vy_high_ord = xr.apply_ufunc(smooth_nantolerant, y, input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs={'func':pynumdiff.finite_difference.finitediff, 'params': high_ord_params, 'min_tracklet_length':min_tracklet_length, "two_outputs":True}, dask = 'parallelized')
+        
+        # Get speed magnitude
+        ds['v_high_ord'] = np.hypot(vx_high_ord, vy_high_ord)/dt
+
+    if 'spline' in smooth_types: # Compute spline smoothed speed
         spline_params = smooth_dict['spline']
-        print(spline_params)
-        # min_tracklet_length = 10*(spline_params['degree'] + 1)
-        # min_tracklet_length = 3*(spline_params['degree'] + 1)
         min_tracklet_length = spline_params['degree'] + 1 # Minimum tracklet length for spline smoothing is degree + 1
 
         ds['x_spline'] = xr.apply_ufunc(smooth_nantolerant, x, input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs={'func': spline_scipy, 'params': spline_params, 'min_tracklet_length': min_tracklet_length}, dask='parallelized')
@@ -131,6 +146,58 @@ def compute_speed(ds:xr.Dataset, smooth_dict:dict, fs: float = 5):
 
         # Speed magnitude
         ds['v_spline'] = speed_from_coords(ds['x_spline'], ds['y_spline'])
+
+    return ds
+
+def compute_ang_speed(ds:xr.Dataset, smooth_dict:dict, fs: float = 5):
+    '''Compute angular speed using methods specified by smooth_dict.'''
+
+    # Frame-coordinate spacing, expressed in seconds.
+    dt = ds['frame'].diff('frame') / fs
+
+    def ang_speed_from_coords(thetas):
+        return thetas.diff('frame') / dt
+
+    def unwrap_angles(thetas:xr.DataArray):
+
+        thetas = np.asarray(thetas, dtype=float)
+
+        # Get all valid theta values
+        valid = np.isfinite(thetas)
+
+        # Create new object to hold unwrapped angles
+        thetas_unwrapped = np.full_like(thetas, np.nan)
+
+        # Unwrap only the valid values along the frame axis
+        thetas_unwrapped[valid] = np.unwrap(thetas[valid])
+
+        return thetas_unwrapped
+
+    # Unwrap theta values to avoid discontinuities at the -pi/pi boundary
+    ds['theta_unwrapped'] = xr.apply_ufunc(unwrap_angles, ds['theta'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, dask='parallelized', output_dtypes=[float])
+
+    if 'raw_ang' in smooth_dict: # Compute instantaneous angular speed from raw positions
+        ds['ang_speed_raw'] = ang_speed_from_coords(ds['theta_unwrapped'])
+
+    if 'high_ord_ang' in smooth_dict: # Compute high-order derivatives
+        high_ord_params = smooth_dict['high_ord_ang']
+        min_tracklet_length = high_ord_params['order'] + 1
+
+        # Smooth unwrapped theta values using spline smoothing
+        ds['theta_high_ord'], vtheta_high_ord = xr.apply_ufunc(smooth_nantolerant, ds['theta_unwrapped'], input_core_dims=[['frame']], output_core_dims=[['frame'],['frame']], vectorize = True,  kwargs={'func':pynumdiff.finite_difference.finitediff, 'params': high_ord_params, 'min_tracklet_length':min_tracklet_length, "two_outputs":True}, dask = 'parallelized')
+        
+        # Angular speed magnitude
+        ds['vtheta_high_ord'] = vtheta_high_ord/dt
+
+    if 'spline_ang' in smooth_dict: # Compute spline smoothed angular speed
+        spline_params = smooth_dict['spline_ang']
+        min_tracklet_length = spline_params['degree'] + 1 # Minimum tracklet length for spline smoothing is degree + 1
+
+        # Smooth unwrapped theta values using spline smoothing
+        ds['theta_spline'] = xr.apply_ufunc(smooth_nantolerant, ds['theta_unwrapped'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, kwargs={'func': spline_scipy, 'params': spline_params, 'min_tracklet_length': min_tracklet_length}, dask='parallelized')
+
+        # Angular speed magnitude
+        ds['vtheta_spline'] = ang_speed_from_coords(ds['theta_spline'])
 
     return ds
 
@@ -225,7 +292,15 @@ def preprocess_ds(ds:xr.Dataset, smooth_dict:dict, fill_gaps:bool, interp_dict:d
     print(f'Speed computed in {(t2 - t1):.2f} s.')
     t1 = t2
 
-    # STEP 4: Compute tracklet lengths
+    # STEP 4: Compute angular velocities
+
+    ds = compute_ang_speed(ds, smooth_dict, fs)
+
+    t2 = time.time()
+    print(f'Angular speed computed in {(t2 - t1):.2f} s.')
+    t1 = t2
+
+    # STEP 5: Compute tracklet lengths
 
     tracklet_lengths = xr.apply_ufunc(compute_tracklet_lengths, ds['missing'], input_core_dims=[['frame']], output_core_dims=[['frame']], vectorize=True, dask='allowed', output_dtypes=[float])   
     ds['tracklet_length'] = tracklet_lengths
@@ -253,3 +328,19 @@ def preprocess_and_save_all_batches(n_batches:int, h5_dir:str, smooth_dict:dict,
 
         # Manage memory
         del ds
+
+if __name__ == "__main__":
+
+    ds_name = f'/bb_kp/20230329/5900_11900_5.0Hz'
+    ds = load_preprocessed_data(ds_name + '.hdf5')
+    interp_dict = {'max_gap': 1, 'max_dist_m': 0.02}
+    fill_gaps = True
+    center_only = True
+    arena_radius_m = 2.38
+    smooth_dict = {'spline': {'degree': 2, 's': 0.000002}, 'spline_ang': {'degree': 2, 's': 0.001}}
+
+    t1 = time.time()
+    ds = compute_ang_speed(ds, smooth_dict, fs = 5)
+    t2 = time.time()
+    print(f'Angular speed computed in {(t2 - t1):.2f} s.')
+    save_ds(ds, ds_name, {'smooth_dict': smooth_dict, 'fill_gaps': fill_gaps, 'interp_dict': interp_dict, 'center_only': center_only, 'radius': arena_radius_m, 'speed_units': 'm/s', 'done_by': 'maya_dagher'})

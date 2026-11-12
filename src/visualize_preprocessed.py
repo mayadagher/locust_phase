@@ -7,6 +7,7 @@ import seaborn as sns
 import os
 
 cwd = os.getcwd()
+from data_handling import load_preprocessed_data
 from helper_fns import *
 from clean_tracks import compute_speed
 
@@ -86,15 +87,18 @@ def plot_smoothed_coords(ds, output_dir: str, smooth_dict:dict, id: int, start_f
     plt.tight_layout()
     param_strs = []
     for smooth in smooth_names:
-        param_str = smooth + '_' + '_'.join([str(param) for param in smooth_dict[smooth].values()])
-        param_strs.append(param_str)
+        if smooth != 'raw':
+            param_str = smooth + '_' + '_'.join([str(param) for param in smooth_dict[smooth].values()])
+            param_strs.append(param_str)
     all_smooths = '_'.join(param_strs)
     plt.savefig(output_dir + f'check_smoothing/{all_smooths}_id_{id}_{abs_frames[0]}_{abs_frames[-1]}.png')
 
-def plot_speed_hists(ds, output_dir: str, smooth_names: list): # Takes preprocessed xarray.Dataset as input
+def plot_speed_hists(ds, output_dir: str, smooth_names: list, v_thresh:float|None = None): # Takes preprocessed xarray.Dataset as input
 
     # Look at all speeds for each ID
     _, axs = plt.subplots(len(smooth_names), 1, figsize=(26, 12), sharey = True, sharex = True)
+
+    abs_frames, _ = get_frame_slice(ds)
     
     # Ensure axs is always a list for consistent indexing
     if len(smooth_names) == 1:
@@ -104,15 +108,18 @@ def plot_speed_hists(ds, output_dir: str, smooth_names: list): # Takes preproces
         speed_vals = ds[f'v_{smooth_names[i]}'].values.ravel()
         valid_speeds = speed_vals[np.isfinite(speed_vals)]
         sns.histplot(valid_speeds, ax=axs[i], bins=500)
-        axs[i].set_title(f'{smooth_names[i].capitalize()} speed')
+        axs[i].set_title(smooth_names[i].capitalize())
+
+        if v_thresh is not None:
+            axs[i].axvline(x = v_thresh, linestyle = '--', color = 'red')
     
     # plt.yscale('log')
     # plt.xscale('log')
-    plt.xlabel('Speed')
+    plt.xlabel('Speed (cm/s)')
     plt.ylabel('Frequency')
     plt.tight_layout()
 
-    plt.savefig(output_dir + 'speed_histograms.png')
+    plt.savefig(f'{output_dir}/check_smoothing/speed_hists_{abs_frames[0]}_{abs_frames[-1]}.png')
 
 def corr_speed_tracklet_length(ds, output_dir: str, smooth_name: str):
     plt.figure(figsize=(10, 10))
@@ -202,11 +209,11 @@ def plot_single_tracklet_lengths(ds, var: str, output_dir: str):
 #     plt.tight_layout()
 #     plt.savefig(f'plots/{exp_name}/batch_{batch_num}/preprocess/tracklet_length_hists/rad_{str(int(radius))}.png')
 
-def plot_ang_speed(ds, output_dir: str, smooth_name: str, start_frame: int = 0, end_frame: int | None = None):
+def plot_ang_speed(ds, output_dir: str, smooth_name: str, start_frame: int = 0, end_frame: int | None = None, fs:float = 5):
     # Look at angular speeds over time for a few IDs
 
     # Get frame slice
-    frames = get_frame_slice(ds, start_frame, end_frame)
+    abs_frames, rel_frames = get_frame_slice(ds, start_frame, end_frame)
 
     _, axs = plt.subplots(2, 1, figsize=(12, 12), sharex = True)
     column_names = [f'theta_{smooth_name}', f'vtheta_{smooth_name}']
@@ -219,13 +226,16 @@ def plot_ang_speed(ds, output_dir: str, smooth_name: str, start_frame: int = 0, 
     ds_ids = ds['id'].values
     for id in ds_ids[:num_ids]:
         for i in range(len(column_names)):
-            fitted_speed = ds[f'{column_names[i]}'].sel(id=id, frame = frames)
+            fitted_speed = ds[f'{column_names[i]}'].sel(id=id, frame = rel_frames)
             copy = fitted_speed.copy()
             if not i:
                 copy[~np.isnan(fitted_speed)] = np.unwrap(fitted_speed[~np.isnan(fitted_speed)]) # Unwrap to make it continuous
                 min_n = min(np.nanmin(copy), min_n)
                 max_n = max(np.nanmax(copy), max_n)
-            axs[i].plot(fitted_speed['frame'], copy, label=f'ID {id}')
+            axs[i].plot(fitted_speed['frame']/fs, copy, label=f'ID {id}')
+            if i == 0:
+                raw_thetas = ds[f'theta_unwrapped'].sel(id=id, frame = rel_frames)
+                axs[i].scatter(raw_thetas['frame']/fs, raw_thetas, color='gray', alpha=0.2, s=10)
             if num_ids < 10:
                 axs[i].legend()
 
@@ -237,11 +247,11 @@ def plot_ang_speed(ds, output_dir: str, smooth_name: str, start_frame: int = 0, 
         axs[0].axhline(n * 2 * np.pi, color='black', linestyle='--', linewidth=0.5)
 
     for i in range(len(column_names)):
-        axs[i].set_xlabel('Frame', fontsize = 17)
+        axs[i].set_xlabel('Time (s)', fontsize = 17)
         axs[i].set_ylabel(f'{column_names[i]}', fontsize = 17)
 
     plt.tight_layout()
-    plt.savefig(output_dir + f'ang_speed_over_time_{smooth_name}.png')
+    plt.savefig(output_dir + f'check_smoothing/vtheta_{smooth_name}_over_time_{abs_frames[0]}_{abs_frames[-1]}.png')
 
 def plot_num_tracklets_over_time(ds:xr.Dataset, output_dir:str):
     # Look at number of tracklets in any given instance to see how many individuals are missing. This assumes all are tracked at one point.
@@ -296,3 +306,8 @@ def corr_tracklet_length_centrality(ds, output_dir: str):
     plt.ylabel('Tracklet length (frames)', fontsize = 17)
     plt.savefig(output_dir + 'corr_tracklet_length_centrality.png')
     print('Rsquared:', np.corrcoef(dists[~np.isnan(dists)], tracklet_lengths[~np.isnan(dists)])[0, 1]**2)
+
+if __name__ == "__main__":
+    ds_name = f'/bb_kp/20230329/0_6000_5.0Hz'
+    ds = load_preprocessed_data(ds_name + '.hdf5')
+    plot_ang_speed(ds, output_dir = '/output/20230329/both/', smooth_name = 'spline', start_frame = 0, end_frame = 300)

@@ -133,7 +133,7 @@ def local_env(pos_valid_t:np.ndarray, thetas_valid_t:np.ndarray, nbr_type:str, n
 
     return density_valid_t, polarizations_valid_t, nematic_orders_valid_t
 
-def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float, density_factor:float = 1, n_jobs:int = -1, chunk_size:int = 250):
+def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, arena_center:np.ndarray, arena_radius:float, x_var:str = 'x_raw', y_var:str = 'y_raw', density_factor:float = 1, n_jobs:int = -1, chunk_size:int = 250):
     '''
     Computes neighbour density, polarization, and nematic order locally.
     
@@ -145,8 +145,8 @@ def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, are
     '''
 
     # Define position and theta array to save time from accessing ds
-    positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
-    thetas = ds['theta'].values # (n_frames, max_ids)
+    positions = np.stack([ds[x_var].transpose('frame', 'id').values, ds[y_var].transpose('frame', 'id').values]) # (2, n_frames, max_ids)
+    thetas = ds['theta'].transpose('frame', 'id').values # (n_frames, max_ids)
 
     # Filter out detections outside of arena
     dist_from_center = np.sqrt((positions[0] - arena_center[0])**2 + (positions[1] - arena_center[1])**2) # (n_frames, max_ids)
@@ -215,6 +215,76 @@ def get_local_env(ds:xr.Dataset, nbr_type:str, nbr_param:float | int | None, are
 
     return ds
 
+def local_density_gradient(ds: xr.Dataset, *, x_var: str = "x_raw", y_var: str = "y_raw", radius: float, bandwidth: float | None = None) -> np.ndarray:
+    """
+    Estimate the local density-gradient vector for each id and frame.
+
+    For each focal individual, sum the gradients of Gaussian kernels centered
+    on the other individuals within `radius`.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Coordinates must have `id` and `frame` dimensions.
+    x_var, y_var : str
+        Position variables, in the same length units as `radius`.
+    radius : float
+        Metric radius for selecting neighbors.
+    bandwidth : float, optional
+        Gaussian kernel bandwidth. Defaults to radius / 2.
+
+    Returns
+    -------
+    gradient : ndarray, shape (2, n_ids, n_frames)
+        `gradient[0]` is the x component; `gradient[1]` is the y component.
+        Invalid focal positions and focal individuals with no neighbors are NaN.
+    """
+    if radius <= 0:
+        raise ValueError("radius must be positive.")
+
+    if bandwidth is None:
+        bandwidth = radius / 2
+    if bandwidth <= 0:
+        raise ValueError("bandwidth must be positive.")
+
+    x = ds[x_var].transpose("id", "frame").values
+    y = ds[y_var].transpose("id", "frame").values
+    n_ids, n_frames = x.shape
+
+    gradient = np.full((2, n_ids, n_frames), np.nan, dtype=float)
+    h2 = bandwidth**2
+
+    for frame_i in range(n_frames):
+        valid_ids = np.flatnonzero(np.isfinite(x[:, frame_i]) & np.isfinite(y[:, frame_i]))
+        
+        if len(valid_ids) < 2:
+            continue
+
+        positions = np.column_stack((x[valid_ids, frame_i], y[valid_ids, frame_i]))
+        tree = BallTree(positions)
+        neighbors = tree.query_radius(positions, r=radius)
+
+        for local_i, local_neighbors in enumerate(neighbors):
+
+            # Remove the focal individual itself.
+            local_neighbors = local_neighbors[local_neighbors != local_i]
+            
+            if local_neighbors.size == 0:
+                continue
+
+            # Displacement vectors from focal to neighbors.
+            delta = positions[local_neighbors] - positions[local_i]
+            r2 = np.sum(delta**2, axis=1)
+
+            # Gradient of the summed 2D Gaussian kernels at the focal position.
+            weights = np.exp(-0.5 * r2 / h2) / (2 * np.pi * h2)
+            grad = np.sum(delta * (weights / h2)[:, None], axis=0)
+
+            full_id = valid_ids[local_i]
+            gradient[:, full_id, frame_i] = grad
+
+    return gradient
+
 def compute_g_of_r(points, arena_size, dr=10, max_r=1000):
     """
     Computes the radial distribution function g(r).
@@ -245,106 +315,3 @@ def compute_g_of_r(points, arena_size, dr=10, max_r=1000):
     g_r = (2 * counts) / (rho * ring_areas * n_ids)
     
     return r_centers, g_r
-
-
-
-# def voronoi_correlation_analysis(ds:xr.Dataset, param:str, arena_center:np.ndarray, arena_radius:float, focal_index: int, start_frame:int = 0, end_frame:int | None = None, subsample:int = 1, tolerance: float = 1e-6) -> tuple[list[Polygon], dict[int, int]]:
-#     '''
-#     Compute correlation length of variable using Voronoi layers as distance metric.
- 
-#     Parameters
-#     ----------
-#     ds:
-#         xr.Dataset with coordinates (frame, id) and containing variable columns including var
-#     param:
-#         Variable column in xr.Dataset on which we want to do correlation analysis.
-#     arena_center:
-#         Numpy array with the coordinates of the arena center.
-#     arena_radius:
-#         Length of the arena radius.
-#     focal_index:
-#         Index into *points* of the focal animal / cell.
-#     start_frame:
-#         Relative index of first frame to be included in the splice for this computation.
-#     end_frame:
-#         Relative index of last frame to be included in the splice for this computation.
-#     subsample:
-#         Step size for computing frame splice, useful for covering wide temporal coverage without overwhelming long compute.
-#     tolerance:
-#         Passed to ``build_adjacency_graph``.
- 
-#     Returns
-#     -------
-#     cells : list[Polygon]
-#         Clipped Voronoi cells.
-#     layers : dict[int, int]
-#         Layer assignment for each cell (−1 = unreachable).
-#     '''
-
-#     # Define position array to save time from accessing ds
-#     positions = np.stack([ds['centroid_x'], ds['centroid_y']]) # (2, n_frames, max_ids)
-#     z = ds[param].values # (n_frames, max_ids)
-
-#     # Filter out detections outside of arena
-#     dist_from_center = np.sqrt((positions[0,:,:] - arena_center[0])**2 + (positions[1,:,:] - arena_center[1])**2) # (n_frames, max_ids)
-#     outside_arena_mask = dist_from_center > arena_radius
-
-#     # Define valid mask
-#     valid_mask = (~np.isnan(positions).any(axis = 0)) & (~np.isnan(z)) & (~outside_arena_mask) # (n_frames, max_ids)
-
-#     # Get frames
-#     abs_frames, ds_idcs = get_frame_slice(ds, start_frame, end_frame, subsample)
-
-#     # Iterate over frames
-#     for f in ds_idcs:
-#         # Filter valid positions and z values
-#         valid_positions_t = positions[:, f, valid_mask[f]]  # (2, n_ids)
-
-#         if valid_positions_t.shape[1] < 3:
-#             continue
-
-#         # Create tessellation
-#         vor = Voronoi(valid_positions_t.T)
-
-#         polys_t = []
-#         z_t = []
-
-#         # Iterate over each point to ensure order is conserved
-#         for point_idx, z_val in enumerate(z[f, valid_mask[f]]):
-#             region_idx = vor.point_region[point_idx]
-#             region = vor.regions[region_idx]
-
-#             # Exclude regions with no points
-#             if len(region) == 0:
-#                 continue
-
-#             # Clip and order vertices
-#             vertices = vor.vertices[np.array(region)[(np.array(region) != -1).astype(bool)].astype(int)]
-#             poly = Polygon(clip_voronoi_region(vertices, arena_center, arena_radius, 0.05))
-
-#             if poly.is_empty:
-#                 continue
-
-#             # Append to lists so that indices of polys and zs align
-#             polys_t.append(poly)
-#             z_t.append(z_val)
-
-#         # Build adjacency graph between vertices
-#         graph = build_adjacency_graph(polys_t, tolerance=tolerance)
-
-#         # Compute Voronoi layers for all individuals
-#         layers_t:list[dict[int, int]] = []
-#         corrs_t
-#         for focal_index in range(len(polys_t)):
-#             layers = compute_layers(graph, focal_index)
-
-#             # Compute correlations binned by Voronoi distance
-#             corrs: dict[int, list] = 
-
-
-#     return cells, layers
-
-# graph = {0: set([1, 2, 3]), 1: set([0, 2]), 2: set([0, 1, 4]), 3: set([0, 4]), 4: set([2, 3])}
-# layers = compute_layers(graph, 1)
-# print(layers)        
-
